@@ -271,6 +271,10 @@ if(HAVE_RDMA)
   list(APPEND EXTRALIBS ${RDMA_LIBRARIES} pthread rt)
 endif(HAVE_RDMA)
 
+if(HAVE_UCX)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${UCX_INCLUDE_DIR}")
+endif(HAVE_UCX)
+
 if(HAVE_DPDK)
   set(CMAKE_CXX_FLAGS "-march=native ${CMAKE_CXX_FLAGS} -I${DPDK_INCLUDE_DIR}")
   list(APPEND EXTRALIBS ${DPDK_LIBRARY})
@@ -382,6 +386,11 @@ if(HAVE_RDMA)
     msg/async/rdma/RDMAStack.cc)
 endif(HAVE_RDMA)
 
+if(HAVE_UCX)
+  list(APPEND async_ucx_common_srcs
+    msg/async/ucx/UCXStack.cc)
+endif(HAVE_UCX)
+
 set(dpdk_common_srcs)
 if(HAVE_DPDK)
   list(APPEND dpdk_common_srcs
@@ -482,6 +491,7 @@ set(libcommon_files
   msg/QueueStrategy.cc
   ${xio_common_srcs}
   ${async_rdma_common_srcs}
+  ${async_ucx_common_srcs}
   ${dpdk_common_srcs}
   msg/msg_types.cc
   common/reverse.c
@@ -637,6 +647,12 @@ set(ceph_common_deps
   ${CMAKE_DL_LIBS})
 if(HAVE_RDMA)
   list(APPEND ceph_common_deps ${RDMA_LIBRARY})
+endif()
+if(HAVE_DPDK)
+  list(APPEND ceph_common_deps ${DPDK_LIBRARIES})
+endif()
+if(HAVE_UCX)
+  list(APPEND ceph_common_deps ${UCX_LIBS})
 endif()
 if(NOT WITH_SYSTEM_BOOST)
   list(APPEND ceph_common_deps ${ZLIB_LIBRARIES})
