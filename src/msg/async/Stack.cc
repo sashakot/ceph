@@ -23,6 +23,9 @@
 #ifdef HAVE_RDMA
 #include "rdma/RDMAStack.h"
 #endif
+#ifdef HAVE_UCX
+#include "ucx/UCXStack.h"
+#endif
 #ifdef HAVE_DPDK
 #include "dpdk/DPDKStack.h"
 #endif
@@ -75,6 +78,10 @@ std::shared_ptr<NetworkStack> NetworkStack::create(CephContext *c, const string 
   else if (t == "dpdk")
     return std::make_shared<DPDKStack>(c, t);
 #endif
+#ifdef HAVE_UCX
+  else if (t == "ucx")
+    return std::make_shared<UCXStack>(c, t);
+#endif
 
   lderr(c) << __func__ << " ms_async_transport_type " << t <<
     " is not supported! " << dendl;
@@ -93,6 +100,10 @@ Worker* NetworkStack::create_worker(CephContext *c, const string &type, unsigned
 #ifdef HAVE_DPDK
   else if (type == "dpdk")
     return new DPDKWorker(c, i);
+#endif
+#ifdef HAVE_UCX
+  else if (type == "ucx")
+    return new UCXWorker(c, i);
 #endif
 
   lderr(c) << __func__ << " ms_async_transport_type " << type <<

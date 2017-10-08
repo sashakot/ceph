@@ -42,8 +42,12 @@ class NetworkWorkerTest : public ::testing::TestWithParam<const char*> {
     cerr << __func__ << " start set up " << GetParam() << std::endl;
     if (strncmp(GetParam(), "dpdk", 4)) {
       g_ceph_context->_conf->set_val("ms_type", "async+posix", false);
+      printf("here...\n");
       addr = "127.0.0.1:15000";
       port_addr = "127.0.0.1:15001";
+      addr = "1.1.1.8:15000";
+      port_addr = "1.1.1.8:15001";
+      g_ceph_context->_conf->set_val("debug ms", "20", false);
     } else {
       g_ceph_context->_conf->set_val("ms_type", "async+dpdk", false);
       g_ceph_context->_conf->set_val("ms_dpdk_debug_allow_loopback", "true", false);
@@ -1041,7 +1045,7 @@ INSTANTIATE_TEST_CASE_P(
 #ifdef HAVE_DPDK
     "dpdk",
 #endif
-    "posix"
+    "rdma"
   )
 );
 
