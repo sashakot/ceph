@@ -565,8 +565,20 @@ UCXStack::UCXStack(CephContext *cct, const string &t) :
     ucp_config_t *ucp_config;
     ucp_params_t params;
 
-    ldout(cct, 0) << __func__ << " constructing UCX stack " << t <<
-      " with " << get_num_worker() << " workers " << dendl;
+    ldout(cct, 0) << __func__ << " constructing UCX stack " << t
+                  << " with " << get_num_worker() << " workers " << dendl;
+
+	int rc = setenv("UCX_CEPH_NET_DEVICES", cct->_conf->ms_async_ucx_device.c_str(), 1);
+	if (rc) {
+		lderr(cct) << __func__ << " failed to export UCX_CEPH_NET_DEVICES. Application aborts." << dendl;
+		ceph_abort();
+	}
+
+	rc = setenv("UCX_CEPH_TLS", cct->_conf->ms_async_ucx_tls.c_str(), 1);
+	if (rc) {
+		lderr(cct) << __func__ << " failed to export UCX_CEPH_TLS. Application aborts." << dendl;
+		ceph_abort();
+	}
 
     status = ucp_config_read("CEPH", NULL, &ucp_config);
     if (UCS_OK != status) {
