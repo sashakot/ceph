@@ -386,6 +386,7 @@ if(HAVE_RDMA)
     msg/async/rdma/RDMAStack.cc)
 endif(HAVE_RDMA)
 
+set(async_ucx_common_srcs)
 if(HAVE_UCX)
   list(APPEND async_ucx_common_srcs
     msg/async/ucx/UCXStack.cc)
