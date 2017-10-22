@@ -40,91 +40,100 @@ int UCXConnectedSocketImpl::is_connected()
 //do blocking connect
 int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const SocketOptions &opts)
 {
-  NetHandler net(cct());
-  int ret;
+    NetHandler net(cct());
+    int ret;
 
-  lderr(cct()) << __func__ << dendl;
+    lderr(cct()) << __func__ << dendl;
 
-  tcp_fd = net.connect(peer_addr, opts.connect_bind_addr);
-  if (tcp_fd < 0) {
-    return -errno;
-  }
+    tcp_fd = net.connect(peer_addr, opts.connect_bind_addr);
+    if (tcp_fd < 0) {
+        return -errno;
+    }
 
-  ldout(cct(), 20) << __func__ << " tcp_fd: " << tcp_fd << dendl;
-  net.set_close_on_exec(tcp_fd);
+    ldout(cct(), 20) << __func__ << " tcp_fd: " << tcp_fd << dendl;
+    net.set_close_on_exec(tcp_fd);
 
-  ret = net.set_socket_options(tcp_fd, opts.nodelay, opts.rcbuf_size);
-  if (ret < 0) {
-    lderr(cct()) << __func__ << " failed to set socket options" << dendl;
-    goto err;
-  }
+    ret = net.set_socket_options(tcp_fd, opts.nodelay, opts.rcbuf_size);
+    if (ret < 0) {
+        lderr(cct()) << __func__ << " failed to set socket options" << dendl;
+        goto err;
+    }
 
-  net.set_priority(tcp_fd, opts.priority, peer_addr.get_family());
-  
-  ret = worker->send_addr(tcp_fd, reinterpret_cast<uint64_t>(this));
-  if (ret != 0) 
-    goto err;
+    net.set_priority(tcp_fd, opts.priority, peer_addr.get_family());
 
-  ret = worker->recv_addr(tcp_fd, &ucp_ep, &dst_tag);
-  if (ret != 0)
-    goto err;
+    ret = worker->send_addr(tcp_fd, reinterpret_cast<uint64_t>(this));
+    if (ret != 0) 
+        goto err;
 
-  return ret; 
+    ret = worker->recv_addr(tcp_fd, &ucp_ep, &dst_tag);
+    if (ret != 0)
+        goto err;
+
+    worker->add_conn(this);
+
+    return 0; 
 err:
-  ::close(tcp_fd);
-  tcp_fd = -1;
-  return ret;
+    ::close(tcp_fd);
+    tcp_fd = -1;
+
+    return ret;
 }
 
 // do blocking accept()
 int UCXConnectedSocketImpl::accept(int server_sock, entity_addr_t *out, const SocketOptions &opt)
 {
-  NetHandler net(cct());
-  int ret = 0;
+    NetHandler net(cct());
+    int ret = 0;
 
-  sockaddr_storage ss;
-  socklen_t slen = sizeof(ss);
-  lderr(cct()) << __func__ << " 3 " << dendl;
-  tcp_fd = ::accept(server_sock, (sockaddr*)&ss, &slen);
-  if (tcp_fd < 0) {
-    return -errno;
-  }
+    sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
 
-  net.set_close_on_exec(tcp_fd);
+    lderr(cct()) << __func__ << " 3 " << dendl;
 
-  lderr(cct()) << __func__ << " 4 " << dendl;
-  ret = net.set_socket_options(tcp_fd, opt.nodelay, opt.rcbuf_size);
-  if (ret < 0) {
-    ret = -errno;
-    goto err;
-  }
+    tcp_fd = ::accept(server_sock, (sockaddr*)&ss, &slen);
+    if (tcp_fd < 0) {
+        return -errno;
+    }
 
-  lderr(cct()) << __func__ << " 2 " << dendl;
-  assert(NULL != out); //out should not be NULL in accept connection
-  out->set_sockaddr((sockaddr*)&ss);
-  net.set_priority(tcp_fd, opt.priority, out->get_family());
+    net.set_close_on_exec(tcp_fd);
 
-  lderr(cct()) << __func__ << " 1 " << dendl;
-  ret = worker->recv_addr(tcp_fd, &ucp_ep, &dst_tag);
-  if (ret != 0)
-    goto err;
+    lderr(cct()) << __func__ << " 4 " << dendl;
+    ret = net.set_socket_options(tcp_fd, opt.nodelay, opt.rcbuf_size);
+    if (ret < 0) {
+        ret = -errno;
+        goto err;
+    }
 
-  lderr(cct()) << __func__ << " ADDRESS RECVD" << dendl;
-  ret = worker->send_addr(tcp_fd, reinterpret_cast<uint64_t>(this));
-  if (ret != 0) 
-    goto err;
+    lderr(cct()) << __func__ << " 2 " << dendl;
+    assert(NULL != out); //out should not be NULL in accept connection
 
-  lderr(cct()) << __func__ << " ADDRESS SENT" << dendl;
-  return 0;
+    out->set_sockaddr((sockaddr*)&ss);
+    net.set_priority(tcp_fd, opt.priority, out->get_family());
 
+    lderr(cct()) << __func__ << " 1 " << dendl;
+
+    ret = worker->recv_addr(tcp_fd, &ucp_ep, &dst_tag);
+    if (ret != 0)
+        goto err;
+
+    lderr(cct()) << __func__ << " ADDRESS RECVD" << dendl;
+
+    ret = worker->send_addr(tcp_fd, reinterpret_cast<uint64_t>(this));
+    if (ret != 0) 
+        goto err;
+
+    worker->add_conn(this);
+    lderr(cct()) << __func__ << " ADDRESS SENT" << dendl;
+
+    return 0;
 err:
-  ::close(tcp_fd);
-  tcp_fd = -1;
-  lderr(cct()) << __func__ << " failed accept " << ret << dendl;
-  return ret;
+    ::close(tcp_fd);
+    tcp_fd = -1;
+    lderr(cct()) << __func__ << " failed accept " << ret << dendl;
+
+    return ret;
 }
     
-
 ssize_t UCXConnectedSocketImpl::read(char *buf, size_t len)
 {
   lderr(cct()) << __func__ << dendl;
@@ -235,7 +244,7 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
     for (n = 0; i != bl.buffers().end(); ++i, n++) {
       iov_list[n].buffer = reinterpret_cast<void *>(const_cast<char *>(i->c_str()));
       iov_list[n].length = i->length();
-      snprintf(ll, sizeof(ll), "iov %d: %p len %d", n, iov_list[n].buffer, iov_list[n].length);
+      snprintf(ll, sizeof(ll), "iov %d: %p len %lu", n, iov_list[n].buffer, iov_list[n].length);
       ldout(cct(), 15) << __func__ << " " << ll << dendl;
     }
 
@@ -263,9 +272,11 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
 
 void UCXConnectedSocketImpl::shutdown()
 {
-  lderr(cct()) << __func__ << dendl;
-  /* TODO: free request */
-  ucp_disconnect_nb(ucp_ep);
+    lderr(cct()) << __func__ << dendl;
+    worker->remove_conn(this);
+    
+    /* TODO: free request */
+    ucp_disconnect_nb(ucp_ep);
 }
 
 void UCXConnectedSocketImpl::close()
@@ -375,51 +386,64 @@ int UCXWorker::listen(entity_addr_t &addr, const SocketOptions &opts, ServerSock
 
 int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *sock)
 {
-  UCXConnectedSocketImpl *p = new UCXConnectedSocketImpl(this);
+    UCXConnectedSocketImpl *p = new UCXConnectedSocketImpl(this);
 
-  int r = p->connect(addr, opts);
-  if (r < 0) {
-    ldout(cct, 1) << __func__ << " try connecting failed." << dendl;
-    delete p;
-    return r;
-  }
-  std::unique_ptr<UCXConnectedSocketImpl> csi(p);
-  *sock = ConnectedSocket(std::move(csi));
-  return 0;
+    int r = p->connect(addr, opts);
+    if (r < 0) {
+        ldout(cct, 1) << __func__ << " try connecting failed." << dendl;
+        delete p;
+
+        return r;
+    }
+
+    std::unique_ptr<UCXConnectedSocketImpl> csi(p);
+    *sock = ConnectedSocket(std::move(csi));
+
+    return 0;
 }
 
 void UCXWorker::dispatch_rx()
 {
-  ucp_tag_message_h msg;
-  ucp_tag_recv_info_t msg_info;
-  ucx_rx_buf *rx_buf;
-  ucx_req_descr *req;
-  UCXConnectedSocketImpl *conn;
-  
-  msg = ucp_tag_probe_nb(ucp_worker, -1, 0, 1, &msg_info);
-  if (msg == NULL) 
-    return;
+	ucp_tag_message_h msg;
+	ucp_tag_recv_info_t msg_info;
+	ucx_rx_buf *rx_buf;
+	ucx_req_descr *req;
 
-  ldout(cct, 20) << __func__ << " message on socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
+	UCXConnectedSocketImpl *conn;
 
-  rx_buf = (ucx_rx_buf *)malloc(sizeof(*rx_buf) + msg_info.length);
-  rx_buf->length = msg_info.length;
-  conn = reinterpret_cast<UCXConnectedSocketImpl *>(msg_info.sender_tag);
+    if (connections.empty()) { //Vasily: whether it's possible ?????????????????????????????
+        return;
+    }
 
-  req = reinterpret_cast<ucx_req_descr *>(ucp_tag_msg_recv_nb(ucp_worker, rx_buf->data, rx_buf->length, 
-                      ucp_dt_make_contig(1), msg, UCXConnectedSocketImpl::recv_completion_cb));
-  if (UCS_PTR_IS_ERR(req)) { 
-    lderr(cct) << __func__ << " FAILED to rx message socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
-    return;
-  }
-  if (ucp_request_test(req, &msg_info) == UCS_INPROGRESS) {
-    req->rx_buf = rx_buf;
-    req->conn = conn; 
-  } else {
-    ldout(cct, 20) << __func__ << " rx completion in place " << dendl;
-    conn->dispatch_rx(rx_buf);
-  }
+    conn = connections.front();
 
+    connections.pop_front();
+    connections.push_back(conn);
+
+	msg = ucp_tag_probe_nb(ucp_worker, reinterpret_cast<uint64_t>(conn), 0, 1, &msg_info);
+	if (msg == NULL) 
+        return;
+
+    assert(conn == reinterpret_cast<UCXConnectedSocketImpl *>(msg_info.sender_tag));
+
+	rx_buf = (ucx_rx_buf *) malloc(sizeof(*rx_buf) + msg_info.length);
+	ldout(cct, 20) << __func__ << " message on socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
+
+    rx_buf->length = msg_info.length;
+    req = reinterpret_cast<ucx_req_descr *>(ucp_tag_msg_recv_nb(ucp_worker, rx_buf->data, rx_buf->length, 
+              ucp_dt_make_contig(1), msg, UCXConnectedSocketImpl::recv_completion_cb));
+    if (UCS_PTR_IS_ERR(req)) { 
+        lderr(cct) << __func__ << " FAILED to rx message socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
+        return;
+    }
+
+    if (ucp_request_test(req, &msg_info) == UCS_INPROGRESS) {
+        req->rx_buf = rx_buf;
+        req->conn = conn; 
+    } else {
+        ldout(cct, 20) << __func__ << " rx completion in place " << dendl;
+        conn->dispatch_rx(rx_buf);
+    }
 }
 
 void UCXWorker::ucp_progress()
@@ -568,17 +592,17 @@ UCXStack::UCXStack(CephContext *cct, const string &t) :
     ldout(cct, 0) << __func__ << " constructing UCX stack " << t
                   << " with " << get_num_worker() << " workers " << dendl;
 
-	int rc = setenv("UCX_CEPH_NET_DEVICES", cct->_conf->ms_async_ucx_device.c_str(), 1);
-	if (rc) {
-		lderr(cct) << __func__ << " failed to export UCX_CEPH_NET_DEVICES. Application aborts." << dendl;
-		ceph_abort();
-	}
+    int rc = setenv("UCX_CEPH_NET_DEVICES", cct->_conf->ms_async_ucx_device.c_str(), 1);
+    if (rc) {
+        lderr(cct) << __func__ << " failed to export UCX_CEPH_NET_DEVICES. Application aborts." << dendl;
+        ceph_abort();
+    }
 
-	rc = setenv("UCX_CEPH_TLS", cct->_conf->ms_async_ucx_tls.c_str(), 1);
-	if (rc) {
-		lderr(cct) << __func__ << " failed to export UCX_CEPH_TLS. Application aborts." << dendl;
-		ceph_abort();
-	}
+    rc = setenv("UCX_CEPH_TLS", cct->_conf->ms_async_ucx_tls.c_str(), 1);
+    if (rc) {
+        lderr(cct) << __func__ << " failed to export UCX_CEPH_TLS. Application aborts." << dendl;
+        ceph_abort();
+    }
 
     status = ucp_config_read("CEPH", NULL, &ucp_config);
     if (UCS_OK != status) {
