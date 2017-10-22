@@ -53,42 +53,54 @@ struct ucx_req_descr {
 };
 
 class UCXWorker : public Worker {
-  ucp_worker_h ucp_worker;
-  UCXStack *stack;
-  ucp_address_t *ucp_addr;
-  size_t ucp_addr_len;
-  EventCallbackRef progress_cb;
-  int ucp_fd;
-  
-  class C_handle_worker_progress : public EventCallback {
-    UCXWorker *worker;
+    ucp_worker_h ucp_worker;
+    UCXStack *stack;
+    ucp_address_t *ucp_addr;
+    size_t ucp_addr_len;
+    EventCallbackRef progress_cb;
+    int ucp_fd;
+
+    std::list<UCXConnectedSocketImpl*> connections;
+
+    class C_handle_worker_progress : public EventCallback {
+        UCXWorker *worker;
     public:
-    C_handle_worker_progress(UCXWorker *w): worker(w) {}
-    void do_request(int fd) {
-      worker->ucp_progress();
+        C_handle_worker_progress(UCXWorker *w): worker(w) {}
+        void do_request(int fd) {
+            worker->ucp_progress();
+        }
+    };
+
+    void ucp_progress(); 
+    // pass received messages to socket(s)
+    void dispatch_rx();
+
+public:
+    explicit UCXWorker(CephContext *c, unsigned i);
+    virtual ~UCXWorker();
+    virtual int listen(entity_addr_t &addr, const SocketOptions &opts, ServerSocket *) override;
+    virtual int connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *socket) override;
+    virtual void initialize() override;
+    virtual void destroy() override;
+
+    void set_stack(UCXStack *s);
+    UCXStack *get_stack() { return stack; }
+    ucp_worker_h get_ucp_worker() { return ucp_worker; }
+
+    // p2p ucp
+    int send_addr(int sock, uint64_t tag);
+    // recv address and create ep
+    int recv_addr(int sock, ucp_ep_h *ep, uint64_t *tag);
+
+    void remove_conn(UCXConnectedSocketImpl *conn) {
+        assert(center.in_thread());
+        connections.remove(conn);
     }
-  };
 
-  void ucp_progress(); 
-  // pass received messages to socket(s)
-  void dispatch_rx();
-
- public:
-  explicit UCXWorker(CephContext *c, unsigned i);
-  virtual ~UCXWorker();
-  virtual int listen(entity_addr_t &addr, const SocketOptions &opts, ServerSocket *) override;
-  virtual int connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *socket) override;
-  virtual void initialize() override;
-  virtual void destroy() override;
-
-  void set_stack(UCXStack *s);
-  UCXStack *get_stack() { return stack; }
-  ucp_worker_h get_ucp_worker() { return ucp_worker; }
-
-  // p2p ucp
-  int send_addr(int sock, uint64_t tag);
-  // recv address and create ep
-  int recv_addr(int sock, ucp_ep_h *ep, uint64_t *tag);
+    void add_conn(UCXConnectedSocketImpl *conn) {
+        assert(center.in_thread());
+        connections.push_back(conn);
+    }
 };
 
 class UCXConnectedSocketImpl : public ConnectedSocketImpl {
