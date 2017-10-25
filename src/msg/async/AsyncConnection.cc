@@ -63,7 +63,7 @@ class C_handle_read : public EventCallback {
  public:
   explicit C_handle_read(AsyncConnectionRef c): conn(c) {}
   void do_request(int fd_or_id) override {
-    conn->process();
+    conn->process(fd_or_id);
   }
 };
 
@@ -169,11 +169,11 @@ void AsyncConnection::maybe_start_delay_thread()
 
 /* return -1 means `fd` occurs error or closed, it should be closed
  * return 0 means EAGAIN or EINTR */
-ssize_t AsyncConnection::read_bulk(char *buf, unsigned len)
+ssize_t AsyncConnection::read_bulk(int fd_or_id, char *buf, unsigned len)
 {
   ssize_t nread;
  again:
-  nread = cs.read(buf, len);
+  nread = cs.read(fd_or_id, buf, len);
   if (nread < 0) {
     if (nread == -EAGAIN) {
       nread = 0;
@@ -237,7 +237,7 @@ ssize_t AsyncConnection::_try_send(bool more)
 //
 // return the remaining bytes, 0 means this buffer is finished
 // else return < 0 means error
-ssize_t AsyncConnection::read_until(unsigned len, char *p)
+ssize_t AsyncConnection::read_until(int fd_or_id, unsigned len, char *p)
 {
   ldout(async_msgr->cct, 25) << __func__ << " len is " << len << " state_offset is "
                              << state_offset << dendl;
@@ -270,7 +270,7 @@ ssize_t AsyncConnection::read_until(unsigned len, char *p)
   if (len > recv_max_prefetch) {
     /* this was a large read, we don't prefetch for these */
     do {
-      r = read_bulk(p+state_offset, left);
+      r = read_bulk(fd_or_id, p+state_offset, left);
       ldout(async_msgr->cct, 25) << __func__ << " read_bulk left is " << left << " got " << r << dendl;
       if (r < 0) {
         ldout(async_msgr->cct, 1) << __func__ << " read failed" << dendl;
@@ -284,7 +284,7 @@ ssize_t AsyncConnection::read_until(unsigned len, char *p)
     } while (r > 0);
   } else {
     do {
-      r = read_bulk(recv_buf+recv_end, recv_max_prefetch);
+      r = read_bulk(fd_or_id, recv_buf+recv_end, recv_max_prefetch);
       ldout(async_msgr->cct, 25) << __func__ << " read_bulk recv_end is " << recv_end
                                  << " left is " << left << " got " << r << dendl;
       if (r < 0) {
@@ -319,7 +319,7 @@ void AsyncConnection::inject_delay() {
   }
 }
 
-void AsyncConnection::process()
+void AsyncConnection::process(int fd_or_id)
 {
   ssize_t r = 0;
   int prev_state = state;
@@ -337,7 +337,7 @@ void AsyncConnection::process()
       case STATE_OPEN:
         {
           char tag = -1;
-          r = read_until(sizeof(tag), &tag);
+          r = read_until(fd_or_id, sizeof(tag), &tag);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read tag failed" << dendl;
             goto fail;
@@ -369,7 +369,7 @@ void AsyncConnection::process()
       case STATE_OPEN_KEEPALIVE2:
         {
           ceph_timespec *t;
-          r = read_until(sizeof(*t), state_buffer);
+          r = read_until(fd_or_id, sizeof(*t), state_buffer);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read keeplive timespec failed" << dendl;
             goto fail;
@@ -393,7 +393,7 @@ void AsyncConnection::process()
       case STATE_OPEN_KEEPALIVE2_ACK:
         {
           ceph_timespec *t;
-          r = read_until(sizeof(*t), state_buffer);
+          r = read_until(fd_or_id, sizeof(*t), state_buffer);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read keeplive timespec failed" << dendl;
             goto fail;
@@ -411,7 +411,7 @@ void AsyncConnection::process()
       case STATE_OPEN_TAG_ACK:
         {
           ceph_le64 *seq;
-          r = read_until(sizeof(*seq), state_buffer);
+          r = read_until(fd_or_id, sizeof(*seq), state_buffer);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read ack seq failed" << dendl;
             goto fail;
@@ -442,7 +442,7 @@ void AsyncConnection::process()
           else
             len = sizeof(oldheader);
 
-          r = read_until(len, state_buffer);
+          r = read_until(fd_or_id, len, state_buffer);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read message header failed" << dendl;
             goto fail;
@@ -567,7 +567,7 @@ void AsyncConnection::process()
             if (!front.length())
               front.push_back(buffer::create(front_len));
 
-            r = read_until(front_len, front.c_str());
+            r = read_until(fd_or_id, front_len, front.c_str());
             if (r < 0) {
               ldout(async_msgr->cct, 1) << __func__ << " read message front failed" << dendl;
               goto fail;
@@ -588,7 +588,7 @@ void AsyncConnection::process()
             if (!middle.length())
               middle.push_back(buffer::create(middle_len));
 
-            r = read_until(middle_len, middle.c_str());
+            r = read_until(fd_or_id, middle_len, middle.c_str());
             if (r < 0) {
               ldout(async_msgr->cct, 1) << __func__ << " read message middle failed" << dendl;
               goto fail;
@@ -634,7 +634,7 @@ void AsyncConnection::process()
           while (msg_left > 0) {
             bufferptr bp = data_blp.get_current_ptr();
             unsigned read = MIN(bp.length(), msg_left);
-            r = read_until(read, bp.c_str());
+            r = read_until(fd_or_id, read, bp.c_str());
             if (r < 0) {
               ldout(async_msgr->cct, 1) << __func__ << " read data error " << dendl;
               goto fail;
@@ -664,7 +664,7 @@ void AsyncConnection::process()
           else
             len = sizeof(old_footer);
 
-          r = read_until(len, state_buffer);
+          r = read_until(fd_or_id, len, state_buffer);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read footer data error " << dendl;
             goto fail;
@@ -835,7 +835,7 @@ void AsyncConnection::process()
 
       default:
         {
-          if (_process_connection() < 0)
+          if (_process_connection(fd_or_id) < 0)
             goto fail;
           break;
         }
@@ -852,7 +852,7 @@ void AsyncConnection::process()
   fault();
 }
 
-ssize_t AsyncConnection::_process_connection()
+ssize_t AsyncConnection::_process_connection(int fd_or_id)
 {
   ssize_t r = 0;
 
@@ -945,7 +945,7 @@ ssize_t AsyncConnection::_process_connection()
         bufferlist myaddrbl;
         unsigned banner_len = strlen(CEPH_BANNER);
         unsigned need_len = banner_len + sizeof(ceph_entity_addr)*2;
-        r = read_until(need_len, state_buffer);
+        r = read_until(fd_or_id, need_len, state_buffer);
         if (r < 0) {
           ldout(async_msgr->cct, 1) << __func__ << " read banner and identify addresses failed" << dendl;
           goto fail;
@@ -1072,7 +1072,7 @@ ssize_t AsyncConnection::_process_connection()
 
     case STATE_CONNECTING_WAIT_CONNECT_REPLY:
       {
-        r = read_until(sizeof(connect_reply), state_buffer);
+        r = read_until(fd_or_id, sizeof(connect_reply), state_buffer);
         if (r < 0) {
           ldout(async_msgr->cct, 1) << __func__ << " read connect reply failed" << dendl;
           goto fail;
@@ -1098,7 +1098,7 @@ ssize_t AsyncConnection::_process_connection()
         if (connect_reply.authorizer_len) {
           ldout(async_msgr->cct, 10) << __func__ << " reply.authorizer_len=" << connect_reply.authorizer_len << dendl;
           assert(connect_reply.authorizer_len < 4096);
-          r = read_until(connect_reply.authorizer_len, state_buffer);
+          r = read_until(fd_or_id, connect_reply.authorizer_len, state_buffer);
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read connect reply authorizer failed" << dendl;
             goto fail;
@@ -1126,7 +1126,7 @@ ssize_t AsyncConnection::_process_connection()
       {
         uint64_t newly_acked_seq = 0;
 
-        r = read_until(sizeof(newly_acked_seq), state_buffer);
+        r = read_until(fd_or_id, sizeof(newly_acked_seq), state_buffer);
         if (r < 0) {
           ldout(async_msgr->cct, 1) << __func__ << " read connect ack seq failed" << dendl;
           goto fail;
@@ -1247,7 +1247,7 @@ ssize_t AsyncConnection::_process_connection()
         bufferlist addr_bl;
         entity_addr_t peer_addr;
 
-        r = read_until(strlen(CEPH_BANNER) + sizeof(ceph_entity_addr), state_buffer);
+        r = read_until(fd_or_id, strlen(CEPH_BANNER) + sizeof(ceph_entity_addr), state_buffer);
         if (r < 0) {
           ldout(async_msgr->cct, 1) << __func__ << " read peer banner and addr failed" << dendl;
           goto fail;
@@ -1283,7 +1283,7 @@ ssize_t AsyncConnection::_process_connection()
 
     case STATE_ACCEPTING_WAIT_CONNECT_MSG:
       {
-        r = read_until(sizeof(connect_msg), state_buffer);
+        r = read_until(fd_or_id, sizeof(connect_msg), state_buffer);
         if (r < 0) {
           ldout(async_msgr->cct, 1) << __func__ << " read connect msg failed" << dendl;
           goto fail;
@@ -1304,7 +1304,7 @@ ssize_t AsyncConnection::_process_connection()
           if (!authorizer_buf.length())
             authorizer_buf.push_back(buffer::create(connect_msg.authorizer_len));
 
-          r = read_until(connect_msg.authorizer_len, authorizer_buf.c_str());
+          r = read_until(fd_or_id, connect_msg.authorizer_len, authorizer_buf.c_str());
           if (r < 0) {
             ldout(async_msgr->cct, 1) << __func__ << " read connect authorizer failed" << dendl;
             goto fail;
@@ -1335,7 +1335,7 @@ ssize_t AsyncConnection::_process_connection()
     case STATE_ACCEPTING_WAIT_SEQ:
       {
         uint64_t newly_acked_seq;
-        r = read_until(sizeof(newly_acked_seq), state_buffer);
+        r = read_until(fd_or_id, sizeof(newly_acked_seq), state_buffer);
         if (r < 0) {
           ldout(async_msgr->cct, 1) << __func__ << " read ack seq failed" << dendl;
           goto fail_registered;
@@ -1747,7 +1747,7 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
         if (existing->state == STATE_CLOSED)
           return ;
         assert(existing->state == STATE_NONE);
-  
+
         existing->state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
         existing->center->create_file_event(existing->cs.fd(), EVENT_READABLE, existing->read_handler);
         reply.global_seq = existing->peer_global_seq;
@@ -2526,7 +2526,7 @@ void AsyncConnection::wakeup_from(uint64_t id)
   lock.lock();
   register_time_events.erase(id);
   lock.unlock();
-  process();
+  process(id);
 }
 
 void AsyncConnection::tick(uint64_t id)

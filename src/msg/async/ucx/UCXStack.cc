@@ -134,31 +134,36 @@ err:
     return ret;
 }
     
-ssize_t UCXConnectedSocketImpl::read(char *buf, size_t len)
+ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
 {
-  lderr(cct()) << __func__ << dendl;
-  if (rx_queue.empty()) 
-    return -EAGAIN;
+    if (fd_or_id == tcp_fd) {
+        assert(fd_or_id > 0);
+        return ::read(tcp_fd, buf, len);
+    }
 
-  ucx_rx_buf *rx_buf;
+    if (rx_queue.empty()) 
+        return -EAGAIN;
 
-  rx_buf = rx_queue.front();
+    size_t left;
+    ucx_rx_buf *rx_buf;
 
-  size_t left = rx_buf->length - rx_buf->offset;
+    rx_buf = rx_queue.front();
+    left = rx_buf->length - rx_buf->offset;
 
-  ldout(cct(), 20) << __func__ << "read to " << buf << " wanted " << len <<
-    " left " << left << dendl;
+    ldout(cct(), 20) << __func__ << " read to " << buf << " wanted " <<
+                             len << " left " << left << dendl;
 
-  if (len < left) {
-    memcpy(buf, rx_buf->data, len);
-    rx_buf->offset += len;
-    return len;
-  } 
-  // TODO: copy more data
-  memcpy(buf, rx_buf->data, left);
-  rx_queue.pop_front();
-  free(rx_buf);
-  return left;
+    if (len < left) {
+        memcpy(buf, rx_buf->data, len);
+        rx_buf->offset += len;
+        return len;
+    } 
+    // TODO: copy more data
+    memcpy(buf, rx_buf->data, left);
+    rx_queue.pop_front();
+    free(rx_buf);
+
+    return left;
 }
 
 ssize_t UCXConnectedSocketImpl::zero_copy_read(bufferptr&)
@@ -185,7 +190,7 @@ void UCXConnectedSocketImpl::dispatch_rx(ucx_rx_buf *buf)
   rx_queue.push_back(buf);
   // todo kick read
   if (read_progress) 
-    read_progress->do_request(0);
+    read_progress->do_request(worker->fd());
 }
 
 void UCXConnectedSocketImpl::recv_completion_cb(void *req, ucs_status_t status,
@@ -272,16 +277,34 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
 
 void UCXConnectedSocketImpl::shutdown()
 {
+    ucs_status_ptr_t request;
+
     lderr(cct()) << __func__ << dendl;
     worker->remove_conn(this);
-    
+
     /* TODO: free request */
-    ucp_disconnect_nb(ucp_ep);
+    request = ucp_ep_close_nb(ucp_ep, UCP_EP_CLOSE_MODE_FLUSH);
+    if (UCS_PTR_IS_ERR(request)) {
+         lderr(cct()) << __func__ << " ucp_ep_close_nb call failed " << dendl;
+    } else if (UCS_PTR_STATUS(request) != UCS_OK) {
+        /* Wait till the request finalizing */
+        ucs_status_t status;
+
+        do {
+            worker->ucp_progress();
+            status = ucp_request_test(request, NULL);
+        } while (status == UCS_INPROGRESS);
+
+        ucp_request_free(request);
+    }
+
+    ::close(tcp_fd);
+    tcp_fd = -1;
 }
 
 void UCXConnectedSocketImpl::close()
 {
-  lderr(cct()) << __func__ << dendl;
+    lderr(cct()) << __func__ << dendl;
 }
 
 UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w) :
@@ -409,7 +432,7 @@ void UCXWorker::dispatch_rx()
 	ucx_rx_buf *rx_buf;
 	ucx_req_descr *req;
 
-	UCXConnectedSocketImpl *conn;
+    UCXConnectedSocketImpl *conn;
 
     if (connections.empty()) { //Vasily: whether it's possible ?????????????????????????????
         return;
@@ -446,30 +469,25 @@ void UCXWorker::dispatch_rx()
     }
 }
 
+void UCXWorker::recv_progress()
+{
+    ucp_progress();
+    dispatch_rx();
+}
+
 void UCXWorker::ucp_progress()
 {
-  int ev_count = 0;
-  ucs_status_t status;
+    int ev_count = 0;
+    ucs_status_t status;
 
-  while (1) {
-    // work around ucx progress bug
-    //for (int i = 0; i < 5; i++)  {
-      ucp_worker_progress(ucp_worker);
-    //}
-    // check for completions... 
-    // dispatch rx state machine
-    dispatch_rx();
-    status = ucp_worker_arm(ucp_worker);
-    ev_count++;
+    do {
+        ucp_worker_progress(ucp_worker);
 
-    if (status == UCS_OK) {
-      break;
-    } else if (status == UCS_ERR_BUSY) {
-      continue;
-    } else {
-    }
-  }
-  ldout(cct, 20) << __func__ << " handler " << ev_count << " events " << dendl;
+        status = ucp_worker_arm(ucp_worker);
+        ev_count++;
+    } while (UCS_OK != status);
+
+    ldout(cct, 20) << __func__ << " handler " << ev_count << " events " << dendl;
 }
 
 void UCXWorker::initialize()
@@ -502,7 +520,7 @@ void UCXWorker::initialize()
     ceph_abort();
   }
   center.create_file_event(ucp_fd, EVENT_READABLE, progress_cb);
-  ucp_progress();
+  recv_progress();
 } 
 
 void UCXWorker::destroy()
