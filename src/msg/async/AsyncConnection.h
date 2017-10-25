@@ -49,7 +49,7 @@ static const int ASYNC_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
  */
 class AsyncConnection : public Connection {
 
-  ssize_t read_bulk(char *buf, unsigned len);
+  ssize_t read_bulk(int fd_or_id, char *buf, unsigned len);
   ssize_t do_sendmsg(struct msghdr &msg, unsigned len, bool more);
   ssize_t try_send(bufferlist &bl, bool more=false) {
     std::lock_guard<std::mutex> l(write_lock);
@@ -59,8 +59,8 @@ class AsyncConnection : public Connection {
   ssize_t _try_send(bool more=false);
   ssize_t _send(Message *m);
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
-  ssize_t read_until(unsigned needed, char *p);
-  ssize_t _process_connection();
+  ssize_t read_until(int fd_or_id, unsigned needed, char *p);
+  ssize_t _process_connection(int fd_or_id);
   void _connect();
   void _stop();
   int handle_connect_reply(ceph_msg_connect &connect, ceph_msg_connect_reply &r);
@@ -375,7 +375,7 @@ class AsyncConnection : public Connection {
  public:
   // used by eventcallback
   void handle_write();
-  void process();
+  void process(int fd_or_id);
   void wakeup_from(uint64_t id);
   void tick(uint64_t id);
   void local_deliver();
