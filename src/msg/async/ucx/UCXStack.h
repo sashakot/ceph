@@ -58,7 +58,7 @@ class UCXWorker : public Worker {
     ucp_address_t *ucp_addr;
     size_t ucp_addr_len;
     EventCallbackRef progress_cb;
-    int ucp_fd;
+    int ucp_fd = -1;
 
     std::list<UCXConnectedSocketImpl*> connections;
 
@@ -67,11 +67,11 @@ class UCXWorker : public Worker {
     public:
         C_handle_worker_progress(UCXWorker *w): worker(w) {}
         void do_request(int fd) {
-            worker->ucp_progress();
+            worker->recv_progress();
         }
     };
 
-    void ucp_progress(); 
+    void recv_progress();
     // pass received messages to socket(s)
     void dispatch_rx();
 
@@ -83,7 +83,9 @@ public:
     virtual void initialize() override;
     virtual void destroy() override;
 
+    void ucp_progress();
     void set_stack(UCXStack *s);
+
     UCXStack *get_stack() { return stack; }
     ucp_worker_h get_ucp_worker() { return ucp_worker; }
 
@@ -100,6 +102,10 @@ public:
     void add_conn(UCXConnectedSocketImpl *conn) {
         assert(center.in_thread());
         connections.push_back(conn);
+    }
+    
+    int fd() {
+        return ucp_fd;
     }
 };
 
@@ -125,7 +131,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
 
     // interface functions
     virtual int is_connected() override;
-    virtual ssize_t read(char*, size_t) override;
+    virtual ssize_t read(int, char*, size_t) override;
     virtual ssize_t zero_copy_read(bufferptr&) override;
     virtual ssize_t send(bufferlist &bl, bool more) override;
     virtual void shutdown() override;

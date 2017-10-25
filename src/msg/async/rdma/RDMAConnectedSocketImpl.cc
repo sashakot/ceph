@@ -251,7 +251,7 @@ void RDMAConnectedSocketImpl::handle_connection() {
   }
 }
 
-ssize_t RDMAConnectedSocketImpl::read(char* buf, size_t len)
+ssize_t RDMAConnectedSocketImpl::read(int fd_or_id, char* buf, size_t len)
 {
   uint64_t i = 0;
   int r = ::read(notify_fd, &i, sizeof(i));

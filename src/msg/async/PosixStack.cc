@@ -66,7 +66,7 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
     return -EOPNOTSUPP;
   }
 
-  ssize_t read(char *buf, size_t len) override {
+  ssize_t read(int fd_or_id, char *buf, size_t len) override {
     ssize_t r = ::read(_fd, buf, len);
     if (r < 0)
       r = -errno;

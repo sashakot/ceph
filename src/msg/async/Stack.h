@@ -28,7 +28,7 @@ class ConnectedSocketImpl {
  public:
   virtual ~ConnectedSocketImpl() {}
   virtual int is_connected() = 0;
-  virtual ssize_t read(char*, size_t) = 0;
+  virtual ssize_t read(int, char*, size_t) = 0;
   virtual ssize_t zero_copy_read(bufferptr&) = 0;
   virtual ssize_t send(bufferlist &bl, bool more) = 0;
   virtual void shutdown() = 0;
@@ -90,8 +90,8 @@ class ConnectedSocket {
   /// Read the input stream with copy.
   ///
   /// Copy an object returning data sent from the remote endpoint.
-  ssize_t read(char* buf, size_t len) {
-    return _csi->read(buf, len);
+  ssize_t read(int fd_or_id, char* buf, size_t len) {
+    return _csi->read(fd_or_id, buf, len);
   }
   /// Gets the input stream.
   ///
