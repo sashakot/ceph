@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
@@ -6,7 +6,7 @@
  * Copyright (C) 2017  Mellanox Technologies Ltd. All rights reserved.
  *
  *
- * Author: Alex Mikheev <alexm@mellanox.com> 
+ * Author: Alex Mikheev <alexm@mellanox.com>
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -67,11 +67,11 @@ class UCXWorker : public Worker {
     public:
         C_handle_worker_progress(UCXWorker *w): worker(w) {}
         void do_request(int fd) {
-            worker->recv_progress();
+            worker->event_progress();
         }
     };
 
-    void recv_progress();
+    void event_progress();
     // pass received messages to socket(s)
     void dispatch_rx();
 
@@ -103,7 +103,7 @@ public:
         assert(center.in_thread());
         connections.push_back(conn);
     }
-    
+
     int fd() {
         return ucp_fd;
     }
@@ -151,7 +151,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     static void send_completion_cb(void *request, ucs_status_t status);
     void send_completion(ucx_req_descr *descr) {
       descr->bl->clear();
-      if (descr->iov_list) 
+      if (descr->iov_list)
         delete descr->iov_list;
     }
     // recv side
