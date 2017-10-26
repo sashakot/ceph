@@ -122,6 +122,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     CephContext *cct() { return worker->cct; }
     EventCallbackRef read_progress = nullptr;
     EventCallbackRef write_progress = nullptr;
+
   public:
     UCXConnectedSocketImpl(UCXWorker *w);
     virtual ~UCXConnectedSocketImpl();
@@ -164,7 +165,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
 class UCXServerSocketImpl : public ServerSocketImpl {
   private:
     UCXWorker *worker;
-    int tcp_fd = -1;
+    int server_setup_socket = -1;
 
     CephContext *cct() { return worker->cct; }
   public:
@@ -177,7 +178,7 @@ class UCXServerSocketImpl : public ServerSocketImpl {
     virtual int accept(ConnectedSocket *sock, const SocketOptions &opt, entity_addr_t *out, Worker *w) override;
     virtual void abort_accept() override;
     // Get file descriptor
-    virtual int fd() const override { return tcp_fd; }
+    virtual int fd() const override { return server_setup_socket; }
 };
 
 class UCXStack : public NetworkStack {
