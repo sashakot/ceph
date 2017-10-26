@@ -202,6 +202,7 @@ void UCXConnectedSocketImpl::recv_completion_cb(void *req, ucs_status_t status,
     lderr(desc->conn->cct()) << __func__ << " completed recv request " << req << dendl;
     desc->conn->dispatch_rx(desc->rx_buf);
   }
+
   ucp_request_release(req);
 }
 
@@ -241,8 +242,7 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
     req = static_cast<ucx_req_descr *>(ucp_tag_send_nb(ucp_ep,
           i->c_str(), i->length(), ucp_dt_make_contig(1),
           dst_tag, send_completion_cb));
-  }
-  else {
+  } else {
     n = 0;
     // TODO: pool alloc, or ucx optimization...
     iov_list = new ucp_dt_iov_t[iov_cnt];
@@ -432,8 +432,6 @@ void UCXWorker::dispatch_rx()
 	ucx_rx_buf *rx_buf;
 	ucx_req_descr *req;
 
-    UCXConnectedSocketImpl *conn;
-
     if (connections.empty()) { //Vasily: whether it's possible ?????????????????????????????
         return;
     }
@@ -476,20 +474,20 @@ void UCXWorker::dispatch_rx()
     }
 }
 
-void UCXWorker::recv_progress()
+void UCXWorker::ucp_progress()
 {
-    ucp_progress();
-    dispatch_rx();
+    assert(center.in_thread());
+    ucp_worker_progress(ucp_worker);
 }
 
-void UCXWorker::ucp_progress()
+void UCXWorker::event_progress()
 {
     int ev_count = 0;
     ucs_status_t status;
 
     do {
         ucp_worker_progress(ucp_worker);
-
+        dispatch_rx();
         status = ucp_worker_arm(ucp_worker);
         ev_count++;
     } while (UCS_OK != status);
@@ -527,7 +525,7 @@ void UCXWorker::initialize()
     ceph_abort();
   }
   center.create_file_event(ucp_fd, EVENT_READABLE, progress_cb);
-  recv_progress();
+  event_progress();
 }
 
 void UCXWorker::destroy()
