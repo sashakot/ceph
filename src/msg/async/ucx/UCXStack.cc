@@ -314,72 +314,76 @@ UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w) :
 
 UCXServerSocketImpl::~UCXServerSocketImpl()
 {
-  if (tcp_fd >= 0)
-    ::close(tcp_fd);
+    if (server_setup_socket >= 0)
+        ::close(server_setup_socket);
 }
 
 int UCXServerSocketImpl::listen(entity_addr_t &sa, const SocketOptions &opt)
 {
-  NetHandler net(cct());
-  int rc;
+    int rc;
+    NetHandler net(cct());
 
-  tcp_fd = net.create_socket(sa.get_family(), true);
-  if (tcp_fd < 0) {
-    lderr(cct()) << __func__ << " failed to create server socket: "
-               << cpp_strerror(errno) << dendl;
-    return -errno;
-  }
+    server_setup_socket = net.create_socket(sa.get_family(), true);
+    if (server_setup_socket < 0) {
+        lderr(cct()) << __func__ << " failed to create server socket: "
+                     << cpp_strerror(errno) << dendl;
+        return -errno;
+    }
 
-  rc = net.set_nonblock(tcp_fd);
-  if (rc < 0) {
-    goto err;
-  }
+    rc = net.set_nonblock(server_setup_socket);
+    if (rc < 0) {
+        goto err;
+    }
 
-  net.set_close_on_exec(tcp_fd);
+    net.set_close_on_exec(server_setup_socket);
 
-  rc = ::bind(tcp_fd, sa.get_sockaddr(), sa.get_sockaddr_len());
-  if (rc < 0) {
-    ldout(cct(), 10) << __func__ << " unable to bind to " << sa.get_sockaddr()
-                   << " on port " << sa.get_port() << ": " << cpp_strerror(errno) << dendl;
-    goto err;
-  }
+    rc = ::bind(server_setup_socket, sa.get_sockaddr(), sa.get_sockaddr_len());
+    if (rc < 0) {
+        ldout(cct(), 10) << __func__ << " unable to bind to " << sa.get_sockaddr()
+                         << " on port " << sa.get_port() << ": " << cpp_strerror(errno) << dendl;
+        goto err;
+    }
 
-  rc = ::listen(tcp_fd, 128);
-  if (rc < 0) {
-    lderr(cct()) << __func__ << " unable to listen on " << sa << ": " << cpp_strerror(errno) << dendl;
-    goto err;
-  }
+    rc = ::listen(server_setup_socket, 128);
+    if (rc < 0) {
+        lderr(cct()) << __func__ << " unable to listen on " << sa << ": " << cpp_strerror(errno) << dendl;
+        goto err;
+    }
 
-  ldout(cct(), 20) << __func__ << " bind to " << sa.get_sockaddr() << " on port " << sa.get_port()  << dendl;
-  return 0;
+    ldout(cct(), 20) << __func__ << " bind to " << sa.get_sockaddr() << " on port " << sa.get_port()  << dendl;
+    return 0;
 
 err:
-  ::close(tcp_fd);
-  tcp_fd = -1;
-  return -errno;
+    ::close(server_setup_socket);
+    server_setup_socket = -1;
+
+    return -errno;
 }
 
 int UCXServerSocketImpl::accept(ConnectedSocket *sock, const SocketOptions &opt, entity_addr_t *out, Worker *w)
 {
-  UCXConnectedSocketImpl *p = new UCXConnectedSocketImpl(dynamic_cast<UCXWorker *>(w));
+    UCXConnectedSocketImpl *p = new UCXConnectedSocketImpl(dynamic_cast<UCXWorker *>(w));
 
-  int r = p->accept(tcp_fd, out, opt);
-  if (r < 0) {
-    ldout(cct(), 1) << __func__ << " accept failed. ret = " << r << dendl;
-    delete p;
-    return r;
-  }
-  std::unique_ptr<UCXConnectedSocketImpl> csi(p);
-  *sock = ConnectedSocket(std::move(csi));
-  return 0;
+    int r = p->accept(server_setup_socket, out, opt);
+    if (r < 0) {
+        ldout(cct(), 1) << __func__ << " accept failed. ret = " << r << dendl;
+        delete p;
+
+        return r;
+    }
+
+    std::unique_ptr<UCXConnectedSocketImpl> csi(p);
+    *sock = ConnectedSocket(std::move(csi));
+
+    return 0;
 }
 
 void UCXServerSocketImpl::abort_accept()
 {
-  if (tcp_fd >= 0)
-    return;
-  ::close(tcp_fd);
-  tcp_fd = -1;
+    if (server_setup_socket >= 0)
+        ::close(server_setup_socket);
+
+    server_setup_socket = -1;
 }
 
 UCXWorker::UCXWorker(CephContext *c, unsigned i) :
