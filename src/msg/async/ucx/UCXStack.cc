@@ -180,7 +180,7 @@ void UCXConnectedSocketImpl::send_completion_cb(void *req, ucs_status_t status)
   lderr(desc->conn->cct()) << __func__ << " completed send request " << req << dendl;
   //ucp_request_free(req);
   desc->conn = NULL;
-  ucp_request_release(req);
+  ucp_request_free(req);
 }
 
 void UCXConnectedSocketImpl::dispatch_rx(ucx_rx_buf *buf)
@@ -203,7 +203,7 @@ void UCXConnectedSocketImpl::recv_completion_cb(void *req, ucs_status_t status,
     desc->conn->dispatch_rx(desc->rx_buf);
   }
 
-  ucp_request_release(req);
+  ucp_request_free(req);
 }
 
 void UCXConnectedSocketImpl::request_init(void *req)
