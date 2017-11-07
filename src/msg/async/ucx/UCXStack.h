@@ -52,6 +52,54 @@ struct ucx_req_descr {
   ucx_rx_buf *rx_buf;
 };
 
+class DummyDataType {
+public:
+    DummyDataType() {
+        ucs_status_t status = ucp_dt_create_generic(
+                                        &dummy_datatype_ops,
+                                        NULL, &ucp_datatype);
+        if (status != UCS_OK) {
+            //lderr(cct()) << __func__ << " ucp_dt_create_generic call failed." << dendl;
+            ceph_abort();
+        }
+    };
+
+    ~DummyDataType() {
+        ucp_dt_destroy(ucp_datatype);
+    }
+
+    static void* dummy_start_cb(void *context,
+                                void *buffer,
+                                size_t count) {
+        return NULL;
+    }
+
+    static size_t dummy_pack_cb(void *state, size_t offset,
+                                void *dest, size_t max_length) {
+        return max_length;
+    }
+
+    static ucs_status_t dummy_unpack_cb(void *state, size_t offset,
+                                        const void *src, size_t count) {
+        return UCS_OK;
+    }
+
+    static size_t dummy_datatype_packed_size(void *state) {
+        return 0;
+    }
+
+    static void dummy_datatype_finish(void *state) {
+    }
+
+    static void dummy_completion_cb(void *req, ucs_status_t status,
+                             ucp_tag_recv_info_t *info) {
+         ucp_request_free(req);
+    }
+
+    ucp_datatype_t ucp_datatype;
+    static const ucp_generic_dt_ops_t dummy_datatype_ops;
+};
+
 class UCXWorker : public Worker {
     ucp_worker_h ucp_worker;
     UCXStack *stack;
@@ -71,6 +119,8 @@ class UCXWorker : public Worker {
         }
     };
 
+    DummyDataType dummy_dtype;
+
     void event_progress();
     // pass received messages to socket(s)
     void dispatch_rx();
@@ -78,8 +128,10 @@ class UCXWorker : public Worker {
 public:
     explicit UCXWorker(CephContext *c, unsigned i);
     virtual ~UCXWorker();
+
     virtual int listen(entity_addr_t &addr, const SocketOptions &opts, ServerSocket *) override;
     virtual int connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *socket) override;
+
     virtual void initialize() override;
     virtual void destroy() override;
 
@@ -94,6 +146,7 @@ public:
     // recv address and create ep
     int recv_addr(int sock, ucp_ep_h *ep, uint64_t *tag);
 
+    void drop_msgs(UCXConnectedSocketImpl *conn);
     void remove_conn(UCXConnectedSocketImpl *conn) {
         assert(center.in_thread());
         connections.remove(conn);
