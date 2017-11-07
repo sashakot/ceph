@@ -275,6 +275,33 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
   return 0;
 }
 
+void UCXWorker::drop_msgs(UCXConnectedSocketImpl *conn)
+{
+    do {
+        ucx_req_descr *req;
+        ucp_tag_message_h msg;
+
+        ucp_tag_recv_info_t msg_info;
+        uint64_t tag = reinterpret_cast<uint64_t>(conn);
+
+        msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 1, &msg_info);
+        if (NULL == msg) {
+            break;
+        }
+
+        req = reinterpret_cast<ucx_req_descr *>(
+                        ucp_tag_msg_recv_nb(
+                                    ucp_worker, NULL,
+                                    1, dummy_dtype.ucp_datatype,
+                                    msg, DummyDataType::dummy_completion_cb));
+
+         while (UCS_INPROGRESS ==
+                    ucp_request_test(req, &msg_info)) {
+            ucp_progress();
+        }
+    } while (1);
+}
+
 void UCXConnectedSocketImpl::shutdown()
 {
     ucs_status_ptr_t request;
@@ -297,6 +324,12 @@ void UCXConnectedSocketImpl::shutdown()
 
         ucp_request_free(request);
     }
+
+    /*
+     * We should care of cleaning UCX unexpected queue
+     * from the messages of just closed UCX ep
+     */
+    worker->drop_msgs(this);
 
     ::close(tcp_fd);
     tcp_fd = -1;
@@ -386,8 +419,17 @@ void UCXServerSocketImpl::abort_accept()
     server_setup_socket = -1;
 }
 
+const ucp_generic_dt_ops_t DummyDataType::dummy_datatype_ops = {
+    .start_pack   = (void* (*)(void*, const void*, size_t)) DummyDataType::dummy_start_cb,
+    .start_unpack = DummyDataType::dummy_start_cb,
+    .packed_size  = DummyDataType::dummy_datatype_packed_size,
+    .pack         = DummyDataType::dummy_pack_cb,
+    .unpack       = DummyDataType::dummy_unpack_cb,
+    .finish       = DummyDataType::dummy_datatype_finish
+};
+
 UCXWorker::UCXWorker(CephContext *c, unsigned i) :
-  Worker(c, i), progress_cb(new C_handle_worker_progress(this))
+  Worker(c, i), progress_cb(new C_handle_worker_progress(this)), dummy_dtype()
 {
 
 }
