@@ -197,6 +197,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     }
 
     // receive dispatch
+    void progress_rx();
 
     //ucp request magic
     static void request_init(void *req);
