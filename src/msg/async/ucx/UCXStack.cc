@@ -198,14 +198,14 @@ void UCXConnectedSocketImpl::dispatch_rx(ucx_rx_buf *buf)
 
 void UCXConnectedSocketImpl::progress_rx()
 {
-    if (read_progress) {
-        /*
-         * 'rx_queue' will be processed by the 'read'
-         * callback called from the upper layer
-         */
-        while (!rx_queue.empty()) {
-            read_progress->do_request(worker->fd());
-        }
+    /*
+     * 'rx_queue' will be processed by the 'read'
+     * callback called from the upper layer.
+     * Will be done nothing if the async connection
+     * is in the 'CLOSED' state already.
+     */
+    if (read_progress && !rx_queue.empty()) {
+        read_progress->do_request(worker->fd());
     }
 }
 
@@ -357,6 +357,14 @@ void UCXConnectedSocketImpl::shutdown()
 void UCXConnectedSocketImpl::close()
 {
     lderr(cct()) << __func__ << dendl;
+    
+    /* Free all undelivered receives */
+    while (!rx_queue.empty()) {
+        ucx_rx_buf *rx_buf = rx_queue.front();
+
+        rx_queue.pop_front();
+        free(rx_buf);
+    }
 }
 
 UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w) :
