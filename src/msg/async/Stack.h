@@ -27,6 +27,7 @@ class Worker;
 class ConnectedSocketImpl {
  public:
   virtual ~ConnectedSocketImpl() {}
+  virtual void start() {};
   virtual int is_connected() = 0;
   virtual ssize_t read(int, char*, size_t) = 0;
   virtual ssize_t zero_copy_read(bufferptr&) = 0;
@@ -104,6 +105,9 @@ class ConnectedSocket {
   /// Gets an object that sends data to the remote endpoint.
   ssize_t send(bufferlist &bl, bool more) {
     return _csi->send(bl, more);
+  }
+  void start() {
+    _csi->start();
   }
   /// Disables output to the socket.
   ///
