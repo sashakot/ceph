@@ -1217,6 +1217,8 @@ ssize_t AsyncConnection::_process_connection(int fd_or_id)
     case STATE_ACCEPTING:
       {
         bufferlist bl;
+
+        cs.start();
         center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
 
         bl.append(CEPH_BANNER, strlen(CEPH_BANNER));

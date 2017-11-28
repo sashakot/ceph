@@ -191,6 +191,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     virtual void shutdown() override;
     virtual void close() override;
     virtual int fd() const override { return tcp_fd; }
+    virtual void start() override;
     virtual void set_event_handlers(EventCallbackRef read_handler, EventCallbackRef write_handler) {
       read_progress = read_handler;
       write_progress = write_handler;

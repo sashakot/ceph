@@ -69,8 +69,6 @@ int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const Socket
     if (ret != 0)
         goto err;
 
-    worker->add_conn(this);
-
     return 0;
 err:
     ::close(tcp_fd);
@@ -122,7 +120,6 @@ int UCXConnectedSocketImpl::accept(int server_sock, entity_addr_t *out, const So
     if (ret != 0)
         goto err;
 
-    worker->add_conn(this);
     lderr(cct()) << __func__ << " ADDRESS SENT" << dendl;
 
     return 0;
@@ -225,6 +222,12 @@ void UCXConnectedSocketImpl::recv_completion_cb(void *req, ucs_status_t status,
     }
 
     ucp_request_free(req);
+}
+
+void UCXConnectedSocketImpl::start()
+{
+    ldout(cct(), 0) << __func__ << " conn = " << (void *)this << " is starting " << dendl;
+    worker->add_conn(this);
 }
 
 void UCXConnectedSocketImpl::request_init(void *req)
@@ -494,6 +497,8 @@ int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, Con
 
     std::unique_ptr<UCXConnectedSocketImpl> csi(p);
     *sock = ConnectedSocket(std::move(csi));
+
+    add_conn(p);
 
     return 0;
 }
