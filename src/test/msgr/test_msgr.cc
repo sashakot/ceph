@@ -65,7 +65,7 @@ class MessengerTest : public ::testing::TestWithParam<const char*> {
   MessengerTest(): server_msgr(NULL), client_msgr(NULL) {}
   void SetUp() override {
     lderr(g_ceph_context) << __func__ << " start set up " << GetParam() << dendl;
-    g_ceph_context->_conf->set_val("debug ms", "20", false);
+    g_ceph_context->_conf->set_val("debug ms", "0", false);
     server_msgr = Messenger::create(g_ceph_context, string(GetParam()), entity_name_t::OSD(0), "server", getpid(), 0);
     client_msgr = Messenger::create(g_ceph_context, string(GetParam()), entity_name_t::CLIENT(-1), "client", getpid(), 0);
     server_msgr->set_default_policy(Messenger::Policy::stateless_server(0));
