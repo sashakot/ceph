@@ -813,7 +813,7 @@ std::vector<Option> get_global_options() {
     .set_description(""),
 
     Option("ms_async_ucx_device", Option::TYPE_STR, Option::LEVEL_ADVANCED)
-    .set_default("mlx5_0:1")
+    .set_default("mlx5_2:1")
     .set_description(""),
 
     Option("ms_async_ucx_tls", Option::TYPE_STR, Option::LEVEL_ADVANCED)
