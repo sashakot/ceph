@@ -61,7 +61,7 @@ int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const Socket
 
     net.set_priority(tcp_fd, opts.priority, peer_addr.get_family());
 
-    ret = worker->send_addr(tcp_fd, reinterpret_cast<uint64_t>(this));
+    ret = worker->send_addr(tcp_fd, static_cast<uint64_t>(tcp_fd));
     if (ret != 0)
         goto err;
 
@@ -116,7 +116,7 @@ int UCXConnectedSocketImpl::accept(int server_sock, entity_addr_t *out, const So
 
     lderr(cct()) << __func__ << " ADDRESS RECVD" << dendl;
 
-    ret = worker->send_addr(tcp_fd, reinterpret_cast<uint64_t>(this));
+    ret = worker->send_addr(tcp_fd, static_cast<uint64_t>(tcp_fd));
     if (ret != 0)
         goto err;
 
@@ -189,7 +189,7 @@ void UCXConnectedSocketImpl::send_completion_cb(void *req, ucs_status_t status)
 
 void UCXConnectedSocketImpl::get_recvs()
 {
-    uint64_t tag = reinterpret_cast<uint64_t>(this);
+    uint64_t tag = static_cast<uint64_t>(tcp_fd);
 
     do {
         ucp_tag_message_h msg;
@@ -361,7 +361,7 @@ void UCXWorker::drop_msgs(UCXConnectedSocketImpl *conn)
         ucp_tag_message_h msg;
 
         ucp_tag_recv_info_t msg_info;
-        uint64_t tag = reinterpret_cast<uint64_t>(conn);
+        uint64_t tag = static_cast<uint64_t>(conn->fd());
 
         msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 1, &msg_info);
         if (NULL == msg) {
@@ -570,7 +570,7 @@ void UCXWorker::dispatch_rx()
     std::list<UCXConnectedSocketImpl*>::iterator iterator;
     for (iterator = connections.begin(); iterator != connections.end(); ++iterator) {
         UCXConnectedSocketImpl *conn = *iterator;
-        uint64_t tag = reinterpret_cast<uint64_t>(conn);
+        uint64_t tag = static_cast<uint64_t>(conn->fd());
 
         msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 0, &msg_info);
         conn->progress_rx(NULL != msg);
