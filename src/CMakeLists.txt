@@ -389,7 +389,8 @@ endif(HAVE_RDMA)
 set(async_ucx_common_srcs)
 if(HAVE_UCX)
   list(APPEND async_ucx_common_srcs
-    msg/async/ucx/UCXStack.cc)
+    msg/async/ucx/UCXStack.cc
+    msg/async/ucx/UCXEvent.cc)
 endif(HAVE_UCX)
 
 set(dpdk_common_srcs)

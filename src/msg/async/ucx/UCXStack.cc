@@ -138,8 +138,11 @@ ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
         return ::read(tcp_fd, buf, len);
     }
 
-    if (rx_queue.empty())
+    get_recvs();
+
+    if (rx_queue.empty()) {
         return -EAGAIN;
+    }
 
     size_t left;
     ucx_rx_buf *rx_buf;
@@ -179,9 +182,59 @@ void UCXConnectedSocketImpl::send_completion_cb(void *req, ucs_status_t status)
 
   desc->conn->send_completion(desc);
   lderr(desc->conn->cct()) << __func__ << " completed send request " << req << dendl;
-  //ucp_request_free(req);
+
   desc->conn = NULL;
   ucp_request_free(req);
+}
+
+void UCXConnectedSocketImpl::get_recvs()
+{
+    uint64_t tag = reinterpret_cast<uint64_t>(this);
+
+    do {
+        ucp_tag_message_h msg;
+        ucp_tag_recv_info_t msg_info;
+
+        msg = ucp_tag_probe_nb(worker->ucp_worker, tag, -1, 1, &msg_info);
+        if (NULL == msg) {
+            break;
+        }
+
+        assert(tag == msg_info.sender_tag);
+
+        ucx_rx_buf *rx_buf = (ucx_rx_buf *) malloc(sizeof(*rx_buf) + msg_info.length);
+        ldout(cct(), 0) << __func__ << " message on conn = " << (void *)this << " len " << msg_info.length << dendl;
+
+        rx_buf->length = msg_info.length;
+        assert(msg_info.length > 0);
+
+        ucx_req_descr *req =
+              reinterpret_cast<ucx_req_descr *>(
+                        ucp_tag_msg_recv_nb(
+                                    worker->ucp_worker,
+                                    rx_buf->data,
+                                    rx_buf->length,
+                                    ucp_dt_make_contig(1),
+                                    msg,
+                                    UCXConnectedSocketImpl::recv_completion_cb));
+        if (UCS_PTR_IS_ERR(req)) {
+            lderr(cct()) << __func__ << " FAILED to rx message socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
+            return;
+        }
+
+        if (ucp_tag_recv_request_test(req, &msg_info) == UCS_INPROGRESS) {
+            req->rx_buf = rx_buf;
+            req->conn = this;
+            ldout(cct(), 20) << __func__ << " req = " << (void *)req << " rx in progress: rx_buf = "
+                                                    << (void *)rx_buf << " rx_buf->length = "
+                                                    << rx_buf->length << " worker " << (void *)this << dendl;
+        } else {
+            ldout(cct(), 20) << __func__ << " req = " << (void *)req << " rx completion in place: rx_buf = "
+                                                    << (void *)rx_buf << " rx_buf->length = "
+                                                    << rx_buf->length << " worker " << (void *)this << dendl;
+            dispatch_rx(rx_buf);
+        }
+    } while (true);
 }
 
 void UCXConnectedSocketImpl::dispatch_rx(ucx_rx_buf *buf)
@@ -193,15 +246,17 @@ void UCXConnectedSocketImpl::dispatch_rx(ucx_rx_buf *buf)
     rx_queue.push_back(buf);
 }
 
-void UCXConnectedSocketImpl::progress_rx()
+void UCXConnectedSocketImpl::progress_rx(bool is_msg)
 {
+    bool recvs = (!rx_queue.empty() || is_msg);
+
     /*
      * 'rx_queue' will be processed by the 'read'
      * callback called from the upper layer.
      * Will be done nothing if the async connection
      * is in the 'CLOSED' state already.
      */
-    if (read_progress && !rx_queue.empty()) {
+    if (read_progress && recvs) {
         read_progress->do_request(worker->fd());
     }
 }
@@ -323,7 +378,7 @@ void UCXWorker::drop_msgs(UCXConnectedSocketImpl *conn)
                     ucp_request_test(req, &msg_info)) {
             ucp_progress();
         }
-    } while (1);
+    } while (true);
 }
 
 void UCXConnectedSocketImpl::shutdown()
@@ -360,7 +415,7 @@ void UCXConnectedSocketImpl::shutdown()
 void UCXConnectedSocketImpl::close()
 {
     lderr(cct()) << __func__ << dendl;
-    
+
     /* Free all undelivered receives */
     while (!rx_queue.empty()) {
         ucx_rx_buf *rx_buf = rx_queue.front();
@@ -507,8 +562,6 @@ void UCXWorker::dispatch_rx()
 {
 	ucp_tag_message_h msg;
 	ucp_tag_recv_info_t msg_info;
-	ucx_rx_buf *rx_buf;
-	ucx_req_descr *req;
 
     if (connections.empty()) { //Vasily: whether it's possible ?????????????????????????????
         return;
@@ -519,44 +572,8 @@ void UCXWorker::dispatch_rx()
         UCXConnectedSocketImpl *conn = *iterator;
         uint64_t tag = reinterpret_cast<uint64_t>(conn);
 
-        msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 1, &msg_info);
-        if (NULL != msg) {
-            assert(tag == msg_info.sender_tag);
-
-            rx_buf = (ucx_rx_buf *) malloc(sizeof(*rx_buf) + msg_info.length);
-            ldout(cct, 20) << __func__ << " message on socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
-
-            rx_buf->length = msg_info.length;
-            assert(msg_info.length > 0);
-
-            req = reinterpret_cast<ucx_req_descr *>(
-                            ucp_tag_msg_recv_nb(
-                                        ucp_worker,
-                                        rx_buf->data,
-                                        rx_buf->length,
-                                        ucp_dt_make_contig(1),
-                                        msg,
-                                        UCXConnectedSocketImpl::recv_completion_cb));
-            if (UCS_PTR_IS_ERR(req)) {
-                lderr(cct) << __func__ << " FAILED to rx message socket " << msg_info.sender_tag << " len " << msg_info.length << dendl;
-                return;
-            }
-
-            if (ucp_tag_recv_request_test(req, &msg_info) == UCS_INPROGRESS) {
-                req->rx_buf = rx_buf;
-                req->conn = conn;
-                ldout(cct, 20) << __func__ << " req = " << (void *)req << " rx in progress: rx_buf = "
-                                                        << (void *)rx_buf << " rx_buf->length = "
-                                                        << rx_buf->length << " worker " << (void *)this << dendl;
-            } else {
-                ldout(cct, 20) << __func__ << " req = " << (void *)req << " rx completion in place: rx_buf = "
-                                                        << (void *)rx_buf << " rx_buf->length = "
-                                                        << rx_buf->length << " worker " << (void *)this << dendl;
-                conn->dispatch_rx(rx_buf);
-            }
-        }
-
-        conn->progress_rx();
+        msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 0, &msg_info);
+        conn->progress_rx(NULL != msg);
     }
 }
 
@@ -568,8 +585,6 @@ void UCXWorker::ucp_progress()
 
 void UCXWorker::event_progress()
 {
-    int ev_count = 0;
-
     do {
         /*
          * Look at 'ucp_worker_arm' usage example (ucp.h).
@@ -577,15 +592,11 @@ void UCXWorker::event_progress()
          * on the file descriptor, this can be achieved by calling
          * 'ucp_worker_progress' repeatedly until it returns 0.
          */
-        do {
-            dispatch_rx();
-        } while (ucp_worker_progress(ucp_worker));
+        while (ucp_worker_progress(ucp_worker));
+        dispatch_rx();
+    } while (UCS_OK != ucp_worker_arm(ucp_worker));
 
-        ev_count++;
-    } while (UCS_OK !=
-                ucp_worker_arm(ucp_worker));
-
-    ldout(cct, 20) << __func__ << " handler " << ev_count << " events " << dendl;
+    ldout(cct, 0) << __func__ << " Exit from events handler" << dendl;
 }
 
 void UCXWorker::initialize()

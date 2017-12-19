@@ -101,7 +101,6 @@ public:
 };
 
 class UCXWorker : public Worker {
-    ucp_worker_h ucp_worker;
     UCXStack *stack;
     ucp_address_t *ucp_addr;
     size_t ucp_addr_len;
@@ -137,6 +136,8 @@ public:
 
     void ucp_progress();
     void set_stack(UCXStack *s);
+
+    ucp_worker_h ucp_worker;
 
     UCXStack *get_stack() { return stack; }
     ucp_worker_h get_ucp_worker() { return ucp_worker; }
@@ -198,7 +199,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     }
 
     // receive dispatch
-    void progress_rx();
+    void progress_rx(bool is_msg);
 
     //ucp request magic
     static void request_init(void *req);
@@ -214,6 +215,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     static void recv_completion_cb(void *request, ucs_status_t status,
                             ucp_tag_recv_info_t *info);
 
+    void get_recvs();
     void dispatch_rx(ucx_rx_buf *buf);
 };
 
