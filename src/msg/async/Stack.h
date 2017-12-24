@@ -27,7 +27,6 @@ class Worker;
 class ConnectedSocketImpl {
  public:
   virtual ~ConnectedSocketImpl() {}
-  virtual void start() {};
   virtual int is_connected() = 0;
   virtual ssize_t read(int, char*, size_t) = 0;
   virtual ssize_t zero_copy_read(bufferptr&) = 0;
@@ -35,8 +34,6 @@ class ConnectedSocketImpl {
   virtual void shutdown() = 0;
   virtual void close() = 0;
   virtual int fd() const = 0;
-  // for the backends that have their own progress logic
-  virtual void set_event_handlers(EventCallbackRef read_handler, EventCallbackRef write_handler) {};
 };
 
 class ConnectedSocket;
@@ -106,9 +103,6 @@ class ConnectedSocket {
   ssize_t send(bufferlist &bl, bool more) {
     return _csi->send(bl, more);
   }
-  void start() {
-    _csi->start();
-  }
   /// Disables output to the socket.
   ///
   /// Current or future writes that have not been successfully flushed
@@ -135,10 +129,6 @@ class ConnectedSocket {
 
   explicit operator bool() const {
     return _csi.get();
-  }
-
-  void set_event_handlers(EventCallbackRef read_handler, EventCallbackRef write_handler) {
-    _csi->set_event_handlers(read_handler, write_handler);
   }
 };
 /// @}

@@ -894,7 +894,6 @@ ssize_t AsyncConnection::_process_connection(int fd_or_id)
         if (r < 0)
           goto fail;
 
-        cs.set_event_handlers(read_handler, write_handler);
         center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
         state = STATE_CONNECTING_RE;
         break;
@@ -1217,8 +1216,6 @@ ssize_t AsyncConnection::_process_connection(int fd_or_id)
     case STATE_ACCEPTING:
       {
         bufferlist bl;
-
-        cs.start();
         center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
 
         bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
@@ -1890,7 +1887,6 @@ void AsyncConnection::accept(ConnectedSocket socket, entity_addr_t &addr)
   state = STATE_ACCEPTING;
   // rescheduler connection in order to avoid lock dep
   center->dispatch_event_external(read_handler);
-  cs.set_event_handlers(read_handler, write_handler);
 }
 
 int AsyncConnection::send_message(Message *m)
