@@ -28,8 +28,6 @@ int UCXDriver::conn_create(int fd,
     }
 
     connections.insert(fd);
-    //std::deque<ucx_rx_buf *> rx_queue = new std::deque<ucx_rx_buf *>();
-    //queues[fd] = rx_queue; //Vasily: ??????
 
     return 0;
 }
@@ -64,7 +62,7 @@ void UCXDriver::conn_close(int fd, ucp_ep_h ucp_ep)
         ucp_request_free(request);
     }
 
-    std::deque<ucx_rx_buf *> rx_queue = queues[fd];
+    std::deque<ucx_rx_buf *> &rx_queue = queues[fd];
 
     /* Free all undelivered receives */
     while (!rx_queue.empty()) {
@@ -73,9 +71,6 @@ void UCXDriver::conn_close(int fd, ucp_ep_h ucp_ep)
         rx_queue.pop_front();
         free(rx_buf);
     }
-
-    queues.erase(fd);
-    //Vasily: delete rx_queue;
 }
 
 void UCXDriver::drop_events(int fd)
@@ -169,8 +164,10 @@ void UCXDriver::insert_zero_msg(int fd)
 {
     ucx_rx_buf *rx_buf = (ucx_rx_buf *) malloc(sizeof(*rx_buf));
 
+    ++undelivered;
+
     rx_buf->length = 0;
-    UCXDriver::dispatch_rx(rx_buf, queues[fd]);
+    UCXDriver::dispatch_rx(rx_buf, (void *) &queues[fd]);
 }
 
 void UCXDriver::recv_msg(int fd, ucp_tag_message_h msg,
@@ -200,7 +197,7 @@ void UCXDriver::recv_msg(int fd, ucp_tag_message_h msg,
 
     if (ucp_tag_recv_request_test(req, &msg_info) == UCS_INPROGRESS) {
         req->rx_buf = rx_buf;
-        req->rx_queue = queues[fd];
+        req->rx_queue = (void *) &queues[fd];
 
         ldout(cct, 0) << __func__ << " req = " << (void *)req << " rx in progress: rx_buf = "
                                                 << (void *)rx_buf << " rx_buf->length = "
@@ -209,7 +206,7 @@ void UCXDriver::recv_msg(int fd, ucp_tag_message_h msg,
         ldout(cct, 0) << __func__ << " req = " << (void *)req << " rx completion in place: rx_buf = "
                                                 << (void *)rx_buf << " rx_buf->length = "
                                                 << rx_buf->length << " fd = " << fd << dendl;
-        UCXDriver::dispatch_rx(rx_buf, queues[fd]);
+        UCXDriver::dispatch_rx(rx_buf, (void *) &queues[fd]);
     }
 }
 
@@ -231,14 +228,20 @@ void UCXDriver::pop_rx_buf(int fd)
 
         queues[fd].pop_front();
         free(rx_buf);
+
+        --undelivered;
+        assert(undelivered >= 0);
     }
 }
 
 void UCXDriver::dispatch_rx(ucx_rx_buf *buf,
-                            std::deque<ucx_rx_buf *> &rx_queue)
+                            void *qptr)
 {
+    std::deque<ucx_rx_buf *> *rx_queue =
+                reinterpret_cast<std::deque<ucx_rx_buf *> *>(qptr);
+
     buf->offset = 0;
-    rx_queue.push_back(buf);
+    (*rx_queue).push_back(buf);
 }
 
 void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
@@ -251,7 +254,7 @@ void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
         return;
     }
 
-    std::set<int> fds;
+    undelivered = 0;
     for (std::set<int>::iterator it = connections.begin(); it != connections.end(); ++it) {
         uint64_t tag = static_cast<uint64_t>(*it);
 
@@ -264,17 +267,17 @@ void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
             }
 
             recv_msg(*it, msg, msg_info);
-            fds.insert(*it);
         }
-    }
 
-    for (std::set<int>::iterator it = fds.begin(); it != fds.end(); ++it) {
-        struct FiredFileEvent fe;
+        if (queues[*it].size() && in_set(conns_pool, (*it))) {
+            struct FiredFileEvent fe;
 
-        fe.fd = (*it);
-        fe.mask = EVENT_READABLE;
+            fe.fd = (*it);
+            fe.mask = EVENT_READABLE;
 
-        fired_events.push_back(fe);
+            fired_events.push_back(fe);
+            undelivered += queues[*it].size();
+        }
     }
 }
 
@@ -289,7 +292,8 @@ void UCXDriver::event_progress(vector<FiredFileEvent> &fired_events)
     while (ucp_worker_progress(ucp_worker));
 
     dispatch_events(fired_events);
-    ldout(cct, 0) << __func__ << " Exit from events handler" << dendl;
+    ldout(cct, 0) << __func__ << " Exit from events handler: num of events = "
+                              << fired_events.size() << dendl;
 }
 
 int UCXDriver::init(EventCenter *c, int nevent)
@@ -301,7 +305,13 @@ int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 {
     ldout(cct, 0) << __func__ << " Add fd = " << fd << dendl;
 
-    //connections.insert(fd);
+    if (EVENT_READABLE & add_mask &&
+                    in_set(connections, fd)) {
+        assert(!in_set(conns_pool, fd));
+        conns_pool.insert(fd);
+        undelivered += queues[fd].size();
+    }
+
 	return EpollDriver::add_event(fd, cur_mask, add_mask);
 }
 
@@ -309,7 +319,14 @@ int UCXDriver::del_event(int fd, int cur_mask, int delmask)
 {
     ldout(cct, 0) << __func__ << " Del fd = " << fd << dendl;
 
-    //connections.erase(fd);
+    if (EVENT_READABLE & delmask &&
+                    in_set(connections, fd)) {
+        assert(in_set(conns_pool, fd));
+        conns_pool.erase(fd);
+        undelivered -= queues[fd].size();
+        assert(undelivered >= 0);
+    }
+
 	return EpollDriver::del_event(fd, cur_mask, delmask);
 }
 
@@ -323,37 +340,35 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
     bool ucp_event = false;
     vector<FiredFileEvent> events;
 
-    if (UCS_OK == ucp_worker_arm(ucp_worker)) {
-        int numevents = EpollDriver::event_wait(events, tvp);
-        if (numevents < 0) {
-            return numevents;
-        }
-
-        for (unsigned i = 0; i < events.size(); ++i) {
-            struct FiredFileEvent fe = events[i];
-
-            if (ucp_fd != fe.fd) {
-                fired_events.push_back(fe);
-                if (EVENT_READABLE & fe.mask) {
-                    insert_zero_msg(fe.fd);
-                }
-            } else {
-                ucp_event = true;
+    do {
+        if (!undelivered && UCS_OK == ucp_worker_arm(ucp_worker)) {
+            int num_events = EpollDriver::event_wait(events, tvp);
+            if (num_events < 0) {
+                return num_events;
             }
-        }
-    } else {
-        ucp_event = true;
-    }
 
-    if (ucp_event) {
-        events.clear();
-        event_progress(events);
+            for (unsigned i = 0; i < events.size(); ++i) {
+                struct FiredFileEvent fe = events[i];
 
-        for (unsigned i = 0; i < events.size(); ++i) {
-            fired_events.push_back(events[i]);
-            ldout(cct, 0) << __func__ << " ucp event on fd = " << events[i].fd << dendl;
+                if (ucp_fd != fe.fd) {
+                    fired_events.push_back(fe);
+                    if (EVENT_READABLE & fe.mask &&
+                                in_set(conns_pool, fe.fd)) {
+                        insert_zero_msg(fe.fd);
+                    }
+                } else {
+                    ucp_event = true;
+                }
+            }
+        } else {
+            ucp_event = true;
+            ldout(cct, 0) << __func__ << " UCP arm makes us to proceed, undelivered = " << undelivered << dendl;
         }
-    }
+
+        if (ucp_event) {
+            event_progress(fired_events);
+        }
+    } while (!fired_events.size());
 
     return fired_events.size();
 }

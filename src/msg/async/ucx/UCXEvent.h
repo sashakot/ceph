@@ -21,7 +21,7 @@ struct ucx_req_descr {
     bufferlist *bl;
     ucp_dt_iov_t *iov_list;
     ucx_rx_buf *rx_buf;
-    std::deque<ucx_rx_buf *> &rx_queue;
+    void *rx_queue;
 };
 
 class DummyDataType {
@@ -75,10 +75,14 @@ class UCXDriver : public EpollDriver {
     private:
         CephContext *cct;
 
+        int undelivered = 0;
+
         int ucp_fd = -1;
         ucp_worker_h ucp_worker;
 
+        std::set<int> conns_pool;
         std::set<int> connections;
+
         DummyDataType dummy_dtype;
 
         std::map<int, std::deque<ucx_rx_buf *>> queues;
@@ -91,7 +95,11 @@ class UCXDriver : public EpollDriver {
                       ucp_tag_recv_info_t &msg_info);
 
         static void dispatch_rx(ucx_rx_buf *buf,
-                                std::deque<ucx_rx_buf *> &rx_queue);
+                                void *qptr);
+
+        bool in_set(std::set<int> set, int fd) {
+            return set.find(fd) != set.end();
+        }
 
     public:
         UCXDriver(CephContext *c): EpollDriver(c), cct(c), dummy_dtype() {}
