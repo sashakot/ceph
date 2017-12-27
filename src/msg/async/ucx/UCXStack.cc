@@ -34,7 +34,7 @@ UCXConnectedSocketImpl::~UCXConnectedSocketImpl()
 int UCXConnectedSocketImpl::is_connected()
 {
   lderr(cct()) << __func__ << " is " << (tcp_fd > 0) << dendl;
-  return tcp_fd > 0;
+  return (NULL != ucp_ep);
 }
 
 // TODO: consider doing a completely non blockig connect/accept
@@ -60,15 +60,14 @@ int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const Socket
         goto err;
     }
 
-    net.set_priority(tcp_fd, opts.priority, peer_addr.get_family());
+    net.set_priority(tcp_fd, opts.priority, peer_addr.get_family()); //Vasily: ??????
 
-    ret = worker->send_addr(tcp_fd, static_cast<uint64_t>(tcp_fd));
-    if (ret != 0)
+    ret =  worker->conn_establish(tcp_fd, &ucp_ep,
+                                  static_cast<uint64_t>(tcp_fd),
+                                  new C_handle_connection(this));
+    if (ret != 0) {
         goto err;
-
-    ret = worker->recv_addr(tcp_fd, &ucp_ep, &dst_tag);
-    if (ret != 0)
-        goto err;
+    }
 
     return 0;
 err:
@@ -78,8 +77,23 @@ err:
     return ret;
 }
 
+void UCXConnectedSocketImpl::handle_connection(int tag)
+{
+    dst_tag = static_cast<uint64_t>(tag);
+
+    assert(ucp_ep);
+    while (!pending.empty()) {
+        bufferlist *bl = pending.front();
+
+        pending.pop_front();
+        send(*bl, 0);
+    }
+}
+
 // do blocking accept()
-int UCXConnectedSocketImpl::accept(int server_sock, entity_addr_t *out, const SocketOptions &opt)
+int UCXConnectedSocketImpl::accept(int server_sock,
+                                   entity_addr_t *out,
+                                   const SocketOptions &opt)
 {
     NetHandler net(cct());
     int ret = 0;
@@ -111,17 +125,14 @@ int UCXConnectedSocketImpl::accept(int server_sock, entity_addr_t *out, const So
 
     lderr(cct()) << __func__ << " 1 " << dendl;
 
-    ret = worker->recv_addr(tcp_fd, &ucp_ep, &dst_tag);
-    if (ret != 0)
+    ret = worker->conn_establish(tcp_fd, &ucp_ep,
+                                 static_cast<uint64_t>(tcp_fd),
+                                 new C_handle_connection(this));
+    if (ret != 0) {
         goto err;
+    }
 
-    lderr(cct()) << __func__ << " ADDRESS RECVD " << dendl;
-
-    ret = worker->send_addr(tcp_fd, static_cast<uint64_t>(tcp_fd));
-    if (ret != 0)
-        goto err;
-
-    lderr(cct()) << __func__ << " ADDRESS SENT " << dendl;
+    lderr(cct()) << __func__ << " Start connecting UCP endpoint " << dendl;
 
     return 0;
 err:
@@ -132,23 +143,30 @@ err:
     return ret;
 }
 
+int UCXWorker::conn_establish(int fd, ucp_ep_h *ep,
+                              uint64_t tag, EventCallbackRef conn_cb)
+{
+    return  driver->conn_establish(fd, ep, tag, conn_cb,
+                                   ucp_addr, ucp_addr_len);
+}
+
 ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
 {
-    UCXDriver *event_driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+    UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
 
-    ucx_rx_buf *rx_buf = event_driver->get_rx_buf(tcp_fd);
+    ucx_rx_buf *rx_buf = driver->get_rx_buf(tcp_fd);
     if (NULL == rx_buf) {
         return -EAGAIN;
     }
 
     if (!rx_buf->length) {
-        event_driver->pop_rx_buf(tcp_fd);
+        driver->pop_rx_buf(tcp_fd);
         return 0;
     }
 
     size_t left = rx_buf->length - rx_buf->offset;
 
-    ldout(cct(), 0) << __func__ << " read to " << (void *)buf << " wanted "
+    ldout(cct(), 10) << __func__ << " read to " << (void *)buf << " wanted "
                                  << len << " left " << left << " rx_buf = "
                                  << (void *)rx_buf << " rx_buf->length = "
                                  << rx_buf->length << dendl;
@@ -161,7 +179,7 @@ ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
 
     // TODO: copy more data
     memcpy(buf, rx_buf->data + rx_buf->offset, left);
-    event_driver->pop_rx_buf(tcp_fd);
+    driver->pop_rx_buf(tcp_fd);
 
     return left;
 }
@@ -195,30 +213,38 @@ void UCXConnectedSocketImpl::request_cleanup(void *req)
   delete desc->bl;
 }
 
-
 ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
 {
-  unsigned iov_cnt = bl.get_num_buffers();
-  unsigned total_len = bl.length();
-  ucx_req_descr *req;
-  int n;
-  ucp_dt_iov_t *iov_list;
-  char ll[256];
+    unsigned iov_cnt = bl.get_num_buffers();
+    unsigned total_len = bl.length();
+    ucx_req_descr *req;
+    int n;
+    ucp_dt_iov_t *iov_list;
+    char ll[256];
 
-  if (total_len == 0)  // TODO: shouldnt happen
-    return 0;
+    if (total_len == 0)  // TODO: shouldnt happen
+        return 0;
 
-  ldout(cct(), 0) << __func__ << " sending " << total_len
-                              << " bytes. iov_cnt " << iov_cnt
-                              << " to " << dst_tag << dendl;
+//Vasily: 'more flag should be taken into account
 
-  std::list<bufferptr>::const_iterator i = bl.buffers().begin();
-  if (iov_cnt == 1) {
+    if (NULL == ucp_ep) {
+        pending.push_back(&bl);
+        ldout(cct(), 10) << __func__ << " put send to the pending, fd: " << tcp_fd << dendl;
+
+        return 0; //return total_len; //Vasily: ?????
+    }
+
+    ldout(cct(), 10) << __func__ << " sending " << total_len
+                                 << " bytes. iov_cnt " << iov_cnt
+                                 << " to " << dst_tag << dendl;
+
+    std::list<bufferptr>::const_iterator i = bl.buffers().begin();
+    if (iov_cnt == 1) {
     iov_list = 0;
     req = static_cast<ucx_req_descr *>(ucp_tag_send_nb(ucp_ep,
           i->c_str(), i->length(), ucp_dt_make_contig(1),
           dst_tag, send_completion_cb));
-  } else {
+    } else {
     n = 0;
     // TODO: pool alloc, or ucx optimization...
     iov_list = new ucp_dt_iov_t[iov_cnt];
@@ -231,36 +257,41 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
 
     req = static_cast<ucx_req_descr *>(ucp_tag_send_nb(ucp_ep, iov_list, iov_cnt, ucp_dt_make_iov(),
           dst_tag, send_completion_cb));
-  }
+    }
 
-  if (req == NULL) {
-    /* in place completion */
-    ldout(cct(), 0) << __func__ << " SENT IN PLACE " << dendl;
-    bl.clear();
+    if (req == NULL) {
+        /* in place completion */
+        ldout(cct(), 0) << __func__ << " SENT IN PLACE " << dendl;
+        bl.clear();
+        return 0;
+    }
+
+    if (UCS_PTR_IS_ERR(req)) {
+        return -1;
+    }
+
+    req->bl->claim_append(bl);
+    req->iov_list = iov_list;
+
+    ldout(cct(), 10) << __func__ << " send in progress req " << req << dendl;
+
     return 0;
-  }
-  if (UCS_PTR_IS_ERR(req)) {
-    return -1;
-  }
-
-  req->bl->claim_append(bl);
-  req->iov_list = iov_list;
-  ldout(cct(), 20) << __func__ << " send in progress req " << req << dendl;
-
-  return 0;
 }
 
 void UCXConnectedSocketImpl::shutdown()
 {
-    UCXDriver *event_driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+    UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
 
-    event_driver->conn_close(tcp_fd, ucp_ep);
+    ldout(cct(), 10) << __func__ << " conn fd: "
+                     << tcp_fd << " is shutting down..." << dendl;
+
+    driver->conn_close(tcp_fd, ucp_ep);
 
     /*
      * We should care of cleaning UCX unexpected queue
      * from the messages of just closed UCX ep
      */
-    event_driver->drop_events(tcp_fd);
+    driver->drop_events(tcp_fd);
 
     ::close(tcp_fd);
     tcp_fd = -1;
@@ -393,76 +424,19 @@ int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, Con
 
 void UCXWorker::initialize()
 {
-    event_driver = dynamic_cast<UCXDriver *>(center.get_driver());
-    event_driver->addr_create(get_stack()->get_ucp_context(),
-                              &ucp_addr, &ucp_addr_len);
+    driver = dynamic_cast<UCXDriver *>(center.get_driver());
+    driver->addr_create(get_stack()->get_ucp_context(),
+                        &ucp_addr, &ucp_addr_len);
 }
 
 void UCXWorker::destroy()
 {
-    event_driver->cleanup(ucp_addr);
+    driver->cleanup(ucp_addr);
 }
 
 void UCXWorker::set_stack(UCXStack *s)
 {
   stack = s;
-}
-
-int UCXWorker::send_addr(int sock, uint64_t tag)
-{
-  ucx_connect_message msg;
-  int rc;
-
-  // send connected message
-  msg.addr_len = ucp_addr_len;
-  msg.tag      = tag;
-
-  rc = ::write(sock, &msg, sizeof(msg));
-  if (rc != sizeof(msg)) {
-    lderr(cct) << __func__ << " failed to send connect msg header" << dendl;
-    return -errno;
-  }
-
-  rc = ::write(sock, ucp_addr, ucp_addr_len);
-  if (rc != (int)ucp_addr_len) {
-    lderr(cct) << __func__ << " failed to send worker address " << dendl;
-    return -errno;
-  }
-
-  return 0;
-}
-
-int UCXWorker::recv_addr(int sock, ucp_ep_h *ep, uint64_t *dst_tag)
-{
-    char *addr_buf;
-    int rc, ret = 0;
-    ucx_connect_message msg;
-
-    // get our peer address
-    rc = ::read(sock, &msg, sizeof(msg));
-    if (rc != sizeof(msg)) {
-        lderr(cct) << __func__ << " failed to recv connect msg header" << dendl;
-        return -errno;
-    }
-
-    ldout(cct, 1) << __func__ << " received tag: "
-                  << msg.tag << " addr len: " << msg.addr_len << dendl;
-
-    *dst_tag = msg.tag;
-    addr_buf = new char [msg.addr_len];
-    rc = ::read(sock, addr_buf, ucp_addr_len);
-    if (rc != (int)ucp_addr_len) {
-        lderr(cct) << __func__ << " failed to recv worker address " << dendl;
-        ret = -errno;
-        goto out;
-    }
-
-    ret = event_driver->conn_create(sock, ep,
-                    reinterpret_cast<ucp_address_t *>(addr_buf));
-
-out:
-    delete [] addr_buf;
-    return ret;
 }
 
 UCXStack::UCXStack(CephContext *cct, const string &t) :
@@ -473,8 +447,8 @@ UCXStack::UCXStack(CephContext *cct, const string &t) :
     ucp_config_t *ucp_config;
     ucp_params_t params;
 
-    ldout(cct, 0) << __func__ << " constructing UCX stack " << t
-                  << " with " << get_num_worker() << " workers " << dendl;
+    ldout(cct, 10) << __func__ << " constructing UCX stack " << t
+                   << " with " << get_num_worker() << " workers " << dendl;
 
     int rc = setenv("UCX_CEPH_NET_DEVICES", cct->_conf->ms_async_ucx_device.c_str(), 1);
     if (rc) {
