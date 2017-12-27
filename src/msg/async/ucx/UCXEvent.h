@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "msg/async/Stack.h"
+#include "msg/async/Event.h"
 #include "msg/async/EventEpoll.h"
 
 extern "C" {
@@ -71,6 +72,11 @@ class DummyDataType {
         static const ucp_generic_dt_ops_t dummy_datatype_ops;
 };
 
+struct connect {
+   ucp_ep_h *ep;
+   EventCallbackRef conn_cb;
+};
+
 class UCXDriver : public EpollDriver {
     private:
         CephContext *cct;
@@ -85,6 +91,7 @@ class UCXDriver : public EpollDriver {
 
         DummyDataType dummy_dtype;
 
+        std::map<int, struct connect> connecting;
         std::map<int, std::deque<ucx_rx_buf *>> queues;
 
         void event_progress(vector<FiredFileEvent> &fired_events);
@@ -101,6 +108,13 @@ class UCXDriver : public EpollDriver {
             return set.find(fd) != set.end();
         }
 
+        char *recv_addr(int fd, uint64_t *dst_tag);
+        int send_addr(int fd, uint64_t tag,
+                      ucp_address_t *ucp_addr,
+                      size_t ucp_addr_len);
+
+        int conn_create(int fd);
+
     public:
         UCXDriver(CephContext *c): EpollDriver(c), cct(c), dummy_dtype() {}
         virtual ~UCXDriver();
@@ -116,9 +130,12 @@ class UCXDriver : public EpollDriver {
                          ucp_address_t **ucp_addr,
                          size_t *ucp_addr_len);
 
-        int conn_create(int fd,
-                        ucp_ep_h *ep,
-                        ucp_address_t *ucp_addr);
+        int conn_establish(int fd,
+                           ucp_ep_h *ep,
+                           uint64_t tag,
+                           EventCallbackRef conn_cb,
+                           ucp_address_t *ucp_addr,
+                           size_t ucp_addr_len);
 
         void drop_events(int fd);
         void conn_close(int fd, ucp_ep_h ucp_ep);
@@ -126,7 +143,6 @@ class UCXDriver : public EpollDriver {
         ucx_rx_buf *get_rx_buf(int fd);
         void pop_rx_buf(int fd);
 
-        // recv side
         static void recv_completion_cb(void *request,
                                        ucs_status_t status,
                                        ucp_tag_recv_info_t *info);
