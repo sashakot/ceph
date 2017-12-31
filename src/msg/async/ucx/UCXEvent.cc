@@ -127,7 +127,7 @@ int UCXDriver::conn_create(int fd)
     connecting.erase(fd);
     assert(connecting.count(fd) == 0);
 
-    conns_pool.insert(fd);
+    waiting_events.insert(fd);
     connections.insert(fd);
 
     ldout(cct, 0) << __func__ << " fd = " << fd
@@ -374,7 +374,7 @@ void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
             recv_msg(*it, msg, msg_info);
         }
 
-        if (queues[*it].size() && in_set(conns_pool, (*it))) {
+        if (queues[*it].size() && in_set(waiting_events, (*it))) {
             struct FiredFileEvent fe;
 
             fe.fd = (*it);
@@ -412,8 +412,8 @@ int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 
     if (EVENT_READABLE & add_mask &&
                     in_set(connections, fd)) {
-        assert(!in_set(conns_pool, fd));
-        conns_pool.insert(fd);
+        assert(!in_set(waiting_events, fd));
+        waiting_events.insert(fd);
         undelivered += queues[fd].size();
     }
 
@@ -426,8 +426,8 @@ int UCXDriver::del_event(int fd, int cur_mask, int delmask)
 
     if (EVENT_READABLE & delmask &&
                     in_set(connections, fd)) {
-        assert(in_set(conns_pool, fd));
-        conns_pool.erase(fd);
+        assert(in_set(waiting_events, fd));
+        waiting_events.erase(fd);
         undelivered -= queues[fd].size();
         assert(undelivered >= 0);
     }
@@ -458,7 +458,7 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
                 fired_events.push_back(fe);
 
                 if ((EVENT_READABLE & fe.mask) &&
-                            (in_set(conns_pool, fe.fd) ||
+                            (in_set(waiting_events, fe.fd) ||
                                 (connecting.count(fe.fd) > 0 &&
                                         conn_create(fe.fd) < 0))) {
                     insert_zero_msg(fe.fd);
