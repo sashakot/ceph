@@ -86,8 +86,8 @@ class UCXDriver : public EpollDriver {
         int ucp_fd = -1;
         ucp_worker_h ucp_worker;
 
-        std::set<int> conns_pool;
         std::set<int> connections;
+        std::set<int> waiting_events;
 
         DummyDataType dummy_dtype;
 
