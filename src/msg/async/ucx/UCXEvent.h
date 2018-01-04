@@ -72,10 +72,12 @@ class DummyDataType {
         static const ucp_generic_dt_ops_t dummy_datatype_ops;
 };
 
-struct connect {
-   ucp_ep_h *ep;
-   EventCallbackRef conn_cb;
-};
+typedef struct {
+    uint64_t  dst_tag;
+    ucp_ep_h  ucp_ep;
+    std::deque<bufferlist*> pending;
+    std::deque<ucx_rx_buf *> rx_queue;
+} connection_t;
 
 class UCXDriver : public EpollDriver {
     private:
@@ -86,13 +88,12 @@ class UCXDriver : public EpollDriver {
         int ucp_fd = -1;
         ucp_worker_h ucp_worker;
 
-        std::set<int> connections;
+        std::set<int> connecting;
         std::set<int> waiting_events;
 
-        DummyDataType dummy_dtype;
+        std::map<int, connection_t> connections;
 
-        std::map<int, struct connect> connecting;
-        std::map<int, std::deque<ucx_rx_buf *>> queues;
+        DummyDataType dummy_dtype;
 
         void event_progress(vector<FiredFileEvent> &fired_events);
         void dispatch_events(vector<FiredFileEvent> &fired_events);
@@ -131,17 +132,29 @@ class UCXDriver : public EpollDriver {
                          size_t *ucp_addr_len);
 
         int conn_establish(int fd,
-                           ucp_ep_h *ep,
-                           uint64_t tag,
-                           EventCallbackRef conn_cb,
                            ucp_address_t *ucp_addr,
                            size_t ucp_addr_len);
 
         void drop_events(int fd);
-        void conn_close(int fd, ucp_ep_h ucp_ep);
+        void conn_close(int fd);
 
         ucx_rx_buf *get_rx_buf(int fd);
         void pop_rx_buf(int fd);
+
+        int is_connected(int fd) {
+            return (connections.count(fd) > 0 &&
+                        NULL != connections[fd].ucp_ep);
+        }
+
+        ssize_t send(int fd, bufferlist &bl, bool more);
+        static void send_completion_cb(void *request, ucs_status_t status);
+
+        static void send_completion(ucx_req_descr *descr) {
+            descr->bl->clear();
+            if (descr->iov_list) {
+                delete descr->iov_list;
+            }
+        }
 
         static void recv_completion_cb(void *request,
                                        ucs_status_t status,

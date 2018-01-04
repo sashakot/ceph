@@ -59,8 +59,7 @@ public:
     virtual void initialize() override;
     virtual void destroy() override;
 
-    int conn_establish(int fd, ucp_ep_h *ep,
-                       uint64_t tag, EventCallbackRef conn_cb);
+    int conn_establish(int fd);
 
     void set_stack(UCXStack *s);
     UCXStack *get_stack() { return stack; }
@@ -68,15 +67,10 @@ public:
 
 class UCXConnectedSocketImpl : public ConnectedSocketImpl {
   private:
-    uint64_t  dst_tag;
-    ucp_ep_h  ucp_ep = NULL;
-
     UCXWorker *worker;
 
     int tcp_fd;
     int state; //Vasily: ??????
-
-    std::deque<bufferlist*> pending;
 
     CephContext *cct() { return worker->cct; }
 
@@ -99,27 +93,6 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
     //ucp request magic
     static void request_init(void *req);
     static void request_cleanup(void *req);
-
-    static void send_completion_cb(void *request, ucs_status_t status);
-
-    static void send_completion(ucx_req_descr *descr) {
-        descr->bl->clear();
-        if (descr->iov_list) {
-            delete descr->iov_list;
-        }
-    }
-
-    void handle_connection(int tag);
-
-    class C_handle_connection : public EventCallback {
-        UCXConnectedSocketImpl *conn;
-
-        public:
-            explicit C_handle_connection(UCXConnectedSocketImpl *c): conn(c) {}
-            void do_request(int tag) override {
-                conn->handle_connection(tag);
-            }
-    };
 };
 
 class UCXServerSocketImpl : public ServerSocketImpl {

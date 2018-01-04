@@ -37,25 +37,20 @@ int UCXDriver::send_addr(int fd, uint64_t tag,
     return 0;
 }
 
-int UCXDriver::conn_establish(
-                           int fd,
-                           ucp_ep_h *ep,
-                           uint64_t tag,
-                           EventCallbackRef conn_cb,
-                           ucp_address_t *ucp_addr,
-                           size_t ucp_addr_len)
+int UCXDriver::conn_establish(int fd,
+                              ucp_address_t *ucp_addr,
+                              size_t ucp_addr_len)
 {
     ldout(cct, 10) << __func__ << " fd = " << fd << " start connecting " << dendl;
 
-    int rc = send_addr(fd, tag, ucp_addr, ucp_addr_len);
+    int rc = send_addr(fd, static_cast<uint64_t>(fd), ucp_addr, ucp_addr_len);
     if (rc < 0) {
-        //Vasily: do smthg bad
+        return rc;
     }
 
 //Vasily: lock here ??????
 
-    connecting[fd].ep = ep;
-    connecting[fd].conn_cb = conn_cb;
+    connecting.insert(fd);
 
     return 0;
 }
@@ -98,13 +93,12 @@ int UCXDriver::conn_create(int fd)
     ucs_status_t status;
     ucp_ep_params_t params;
 
-    uint64_t dst_tag;
+    connection_t &conn = connections[fd];
 
-    assert(connecting.count(fd) == 1);
-    ldout(cct, 0) << __func__ << " conn for fd = " << fd
+    ldout(cct, 20) << __func__ << " conn for fd = " << fd
                                << " is creating " << dendl;
 
-    char *addr_buf = recv_addr(fd, &dst_tag);
+    char *addr_buf = recv_addr(fd, &conn.dst_tag);
     if (!addr_buf) {
         return -EINVAL;
     }
@@ -112,30 +106,33 @@ int UCXDriver::conn_create(int fd)
     params.address    = reinterpret_cast<ucp_address_t *>(addr_buf);
     params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
 
-    status = ucp_ep_create(ucp_worker, &params, connecting[fd].ep);
+    status = ucp_ep_create(ucp_worker, &params, &conn.ucp_ep);
     if (UCS_OK != status) {
         lderr(cct) << __func__ << " failed to create UCP endpoint " << dendl;
         return -EINVAL;
     }
 
-    //Vasily: lock here ?????
-    connecting[fd].conn_cb->do_request(static_cast<int>(dst_tag));
+    std::deque<bufferlist*> &pending = conn.pending;
+
+    while (!pending.empty()) {
+        bufferlist *bl = pending.front();
+
+        pending.pop_front();
+        send(fd, *bl, 0);
+    }
 
     delete [] addr_buf; //Vasily: allocate it in this func ????
-    delete connecting[fd].conn_cb;  //Vasily: when delete this C_handle_connection ??????
 
     connecting.erase(fd);
-    assert(connecting.count(fd) == 0);
 
     waiting_events.insert(fd);
-    connections.insert(fd);
+    undelivered += conn.rx_queue.size();
 
-    ldout(cct, 0) << __func__ << " fd = " << fd
+    ldout(cct, 20) << __func__ << " fd = " << fd
                    << " connection was successfully created " << dendl;
 
     return 0;
 }
-
 
 const ucp_generic_dt_ops_t DummyDataType::dummy_datatype_ops = {
     .start_pack   = (void* (*)(void*, const void*, size_t)) DummyDataType::dummy_start_cb,
@@ -146,11 +143,11 @@ const ucp_generic_dt_ops_t DummyDataType::dummy_datatype_ops = {
     .finish       = DummyDataType::dummy_datatype_finish
 };
 
-void UCXDriver::conn_close(int fd, ucp_ep_h ucp_ep)
+void UCXDriver::conn_close(int fd)
 {
     ucs_status_ptr_t request;
+    ucp_ep_h ucp_ep = connections[fd].ucp_ep;
 
-    connections.erase(fd);
     ldout(cct, 10) << __func__ << " conn = " << (void *)ucp_ep
                                << " is shutting down " << dendl;
 
@@ -167,7 +164,7 @@ void UCXDriver::conn_close(int fd, ucp_ep_h ucp_ep)
         ucp_request_free(request);
     }
 
-    std::deque<ucx_rx_buf *> &rx_queue = queues[fd];
+    std::deque<ucx_rx_buf *> &rx_queue = connections[fd].rx_queue;
 
     /* Free all undelivered receives */
     while (!rx_queue.empty()) {
@@ -176,6 +173,8 @@ void UCXDriver::conn_close(int fd, ucp_ep_h ucp_ep)
         rx_queue.pop_front();
         free(rx_buf);
     }
+
+    connections.erase(fd);
 }
 
 void UCXDriver::drop_events(int fd)
@@ -252,6 +251,86 @@ UCXDriver::~UCXDriver()
 {
 }
 
+ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
+{
+    ucx_req_descr *req;
+    ucp_dt_iov_t *iov_list;
+
+    unsigned total_len = bl.length();
+    unsigned iov_cnt = bl.get_num_buffers();
+
+    if (total_len == 0) {// TODO: shouldn't happen
+        return 0;
+    }
+
+//Vasily: 'more flag should be taken into account
+
+    if (NULL == connections[fd].ucp_ep) {
+        connections[fd].pending.push_back(&bl);
+        ldout(cct, 20) << __func__ << " put send to the pending, fd: " << fd << dendl;
+
+        return 0; //return total_len; //Vasily: ?????
+    }
+
+    ldout(cct, 20) << __func__ << " sending " << total_len
+                               << " bytes. iov_cnt " << iov_cnt
+                               << " to " << connections[fd].dst_tag << dendl;
+
+    std::list<bufferptr>::const_iterator i = bl.buffers().begin();
+
+    if (iov_cnt == 1) {
+        iov_list = NULL;
+        req = static_cast<ucx_req_descr *>(
+                        ucp_tag_send_nb(
+                            connections[fd].ucp_ep,
+                            i->c_str(), i->length(),
+                            ucp_dt_make_contig(1),
+                            connections[fd].dst_tag,
+                            send_completion_cb));
+    } else {
+        iov_list = new ucp_dt_iov_t[iov_cnt];
+
+        for (int n = 0; i != bl.buffers().end(); ++i, n++) {
+            iov_list[n].buffer = (void *)(i->c_str());
+            iov_list[n].length = i->length();
+        }
+
+        req = static_cast<ucx_req_descr *>(
+                        ucp_tag_send_nb(
+                            connections[fd].ucp_ep,
+                            iov_list, iov_cnt,
+                            ucp_dt_make_iov(),
+                            connections[fd].dst_tag,
+                            send_completion_cb));
+    }
+
+    if (req == NULL) {
+        /* in place completion */
+        ldout(cct, 20) << __func__ << " SENT IN PLACE " << dendl;
+        bl.clear();
+        return 0;
+    }
+
+    if (UCS_PTR_IS_ERR(req)) {
+        return -1;
+    }
+
+    req->bl->claim_append(bl);
+    req->iov_list = iov_list;
+
+    ldout(cct, 10) << __func__ << " send in progress req " << req << dendl;
+
+    return 0;
+}
+
+void UCXDriver::send_completion_cb(void *req, ucs_status_t status)
+{
+    ucx_req_descr *desc = static_cast<ucx_req_descr *>(req);
+
+    UCXDriver::send_completion(desc);
+    ucp_request_free(req);
+}
+
 void UCXDriver::recv_completion_cb(void *req, ucs_status_t status,
                                    ucp_tag_recv_info_t *info)
 {
@@ -272,14 +351,14 @@ void UCXDriver::insert_zero_msg(int fd)
     ++undelivered;
 
     rx_buf->length = 0;
-    UCXDriver::dispatch_rx(rx_buf, (void *) &queues[fd]);
+    UCXDriver::dispatch_rx(rx_buf, (void *) &connections[fd].rx_queue);
 }
 
 void UCXDriver::recv_msg(int fd, ucp_tag_message_h msg,
                          ucp_tag_recv_info_t &msg_info)
 {
     ucx_rx_buf *rx_buf = (ucx_rx_buf *) malloc(sizeof(*rx_buf) + msg_info.length);
-    ldout(cct, 0) << __func__ << " message on fd = " << fd << " len " << msg_info.length << dendl;
+    ldout(cct, 20) << __func__ << " message on fd = " << fd << " len " << msg_info.length << dendl;
 
     rx_buf->length = msg_info.length;
     assert(msg_info.length > 0);
@@ -302,7 +381,7 @@ void UCXDriver::recv_msg(int fd, ucp_tag_message_h msg,
 
     if (ucp_tag_recv_request_test(req, &msg_info) == UCS_INPROGRESS) {
         req->rx_buf = rx_buf;
-        req->rx_queue = (void *) &queues[fd];
+        req->rx_queue = (void *) &connections[fd].rx_queue;
 
         ldout(cct, 10) << __func__ << " req = " << (void *)req << " rx in progress: rx_buf = "
                                                 << (void *)rx_buf << " rx_buf->length = "
@@ -311,27 +390,31 @@ void UCXDriver::recv_msg(int fd, ucp_tag_message_h msg,
         ldout(cct, 10) << __func__ << " req = " << (void *)req << " rx completion in place: rx_buf = "
                                                 << (void *)rx_buf << " rx_buf->length = "
                                                 << rx_buf->length << " fd = " << fd << dendl;
-        UCXDriver::dispatch_rx(rx_buf, (void *) &queues[fd]);
+        UCXDriver::dispatch_rx(rx_buf, (void *) &connections[fd].rx_queue);
     }
 }
 
 ucx_rx_buf *UCXDriver::get_rx_buf(int fd)
 {
-    if (queues[fd].empty()) {
+    std::deque<ucx_rx_buf *> &rx_queue = connections[fd].rx_queue;
+
+    if (rx_queue.empty()) {
         ldout(cct, 10) << __func__ << " queue of fd = " << fd << " is empty " << dendl;
         return NULL;
     }
 
     ldout(cct, 10) << __func__ << " return recv message for fd = " << fd << dendl;
-    return queues[fd].front();
+    return rx_queue.front();
 }
 
 void UCXDriver::pop_rx_buf(int fd)
 {
-    if (!queues[fd].empty()) {
-        ucx_rx_buf *rx_buf = queues[fd].front();
+    std::deque<ucx_rx_buf *> &rx_queue = connections[fd].rx_queue;
 
-        queues[fd].pop_front();
+    if (!rx_queue.empty()) {
+        ucx_rx_buf *rx_buf = rx_queue.front();
+
+        rx_queue.pop_front();
         free(rx_buf);
 
         --undelivered;
@@ -355,15 +438,19 @@ void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
 	ucp_tag_recv_info_t msg_info;
 
     if (connections.empty()) {
-        ldout(cct, 0) << __func__ << " The connections list is empty " << dendl;
+        ldout(cct, 20) << __func__ << " The connections list is empty " << dendl;
         return;
     }
 
     undelivered = 0;
-    for (std::set<int>::iterator it = connections.begin(); it != connections.end(); ++it) {
-        uint64_t tag = static_cast<uint64_t>(*it);
+    for (std::map<int, connection_t>::iterator it = connections.begin();
+                                            it != connections.end(); ++it) {
+        int fd = it->first;
+        connection_t &conn = it->second;
 
-        ldout(cct, 10) << __func__ << " Trying recv for fd = " << *it << dendl;
+        uint64_t tag = static_cast<uint64_t>(fd);
+
+        ldout(cct, 20) << __func__ << " Trying recv for fd = " << fd << dendl;
 
         while (true) {
             msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 1, &msg_info);
@@ -371,17 +458,17 @@ void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
                 break;
             }
 
-            recv_msg(*it, msg, msg_info);
+            recv_msg(fd, msg, msg_info);
         }
 
-        if (queues[*it].size() && in_set(waiting_events, (*it))) {
+        if (conn.rx_queue.size() && in_set(waiting_events, fd)) {
             struct FiredFileEvent fe;
 
-            fe.fd = (*it);
+            fe.fd = fd;
             fe.mask = EVENT_READABLE;
 
             fired_events.push_back(fe);
-            undelivered += queues[*it].size();
+            undelivered += conn.rx_queue.size();
         }
     }
 }
@@ -408,13 +495,13 @@ int UCXDriver::init(EventCenter *c, int nevent)
 
 int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 {
-    ldout(cct, 0) << __func__ << " Add fd = " << fd << dendl;
+    ldout(cct, 0) << __func__ << " fd = " << fd << dendl;
 
     if (EVENT_READABLE & add_mask &&
-                    in_set(connections, fd)) {
+                        is_connected(fd)) {
         assert(!in_set(waiting_events, fd));
         waiting_events.insert(fd);
-        undelivered += queues[fd].size();
+        undelivered += connections[fd].rx_queue.size();
     }
 
 	return EpollDriver::add_event(fd, cur_mask, add_mask);
@@ -422,13 +509,13 @@ int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 
 int UCXDriver::del_event(int fd, int cur_mask, int delmask)
 {
-    ldout(cct, 0) << __func__ << " Del fd = " << fd << dendl;
+    ldout(cct, 0) << __func__ << " fd = " << fd << dendl;
 
     if (EVENT_READABLE & delmask &&
-                    in_set(connections, fd)) {
+                        is_connected(fd)) {
         assert(in_set(waiting_events, fd));
         waiting_events.erase(fd);
-        undelivered -= queues[fd].size();
+        undelivered -= connections[fd].rx_queue.size();
         assert(undelivered >= 0);
     }
 
@@ -455,21 +542,25 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
             struct FiredFileEvent fe = events[i];
 
             if (ucp_fd != fe.fd) {
-                fired_events.push_back(fe);
-
                 if ((EVENT_READABLE & fe.mask) &&
                             (in_set(waiting_events, fe.fd) ||
                                 (connecting.count(fe.fd) > 0 &&
                                         conn_create(fe.fd) < 0))) {
                     insert_zero_msg(fe.fd);
                 }
+
+                if (!connections.count(fe.fd) ||
+                            in_set(waiting_events, fe.fd)) {
+                    ldout(cct, 20) << __func__ << " fd = " << fe.fd << " fired event " << dendl;
+                    fired_events.push_back(fe);
+                 }
             } else {
                 ucp_event = true;
             }
         }
     } else {
         ucp_event = true;
-        ldout(cct, 10) << __func__ << " UCP arm is not OK, undelivered = " << undelivered << dendl;
+        ldout(cct, 20) << __func__ << " UCP arm is not OK, undelivered = " << undelivered << dendl;
     }
 
     if (ucp_event) {
