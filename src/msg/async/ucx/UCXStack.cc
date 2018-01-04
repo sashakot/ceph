@@ -33,8 +33,8 @@ UCXConnectedSocketImpl::~UCXConnectedSocketImpl()
 
 int UCXConnectedSocketImpl::is_connected()
 {
-  lderr(cct()) << __func__ << " is " << (tcp_fd > 0) << dendl;
-  return (NULL != ucp_ep);
+    UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+    return driver->is_connected(tcp_fd);
 }
 
 // TODO: consider doing a completely non blockig connect/accept
@@ -62,9 +62,7 @@ int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const Socket
 
     net.set_priority(tcp_fd, opts.priority, peer_addr.get_family()); //Vasily: ??????
 
-    ret =  worker->conn_establish(tcp_fd, &ucp_ep,
-                                  static_cast<uint64_t>(tcp_fd),
-                                  new C_handle_connection(this));
+    ret =  worker->conn_establish(tcp_fd);
     if (ret != 0) {
         goto err;
     }
@@ -75,19 +73,6 @@ err:
     tcp_fd = -1;
 
     return ret;
-}
-
-void UCXConnectedSocketImpl::handle_connection(int tag)
-{
-    dst_tag = static_cast<uint64_t>(tag);
-
-    assert(ucp_ep);
-    while (!pending.empty()) {
-        bufferlist *bl = pending.front();
-
-        pending.pop_front();
-        send(*bl, 0);
-    }
 }
 
 // do blocking accept()
@@ -125,9 +110,7 @@ int UCXConnectedSocketImpl::accept(int server_sock,
 
     lderr(cct()) << __func__ << " 1 " << dendl;
 
-    ret = worker->conn_establish(tcp_fd, &ucp_ep,
-                                 static_cast<uint64_t>(tcp_fd),
-                                 new C_handle_connection(this));
+    ret = worker->conn_establish(tcp_fd);
     if (ret != 0) {
         goto err;
     }
@@ -143,11 +126,9 @@ err:
     return ret;
 }
 
-int UCXWorker::conn_establish(int fd, ucp_ep_h *ep,
-                              uint64_t tag, EventCallbackRef conn_cb)
+int UCXWorker::conn_establish(int fd)
 {
-    return  driver->conn_establish(fd, ep, tag, conn_cb,
-                                   ucp_addr, ucp_addr_len);
+    return  driver->conn_establish(fd, ucp_addr, ucp_addr_len);
 }
 
 ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
@@ -190,14 +171,6 @@ ssize_t UCXConnectedSocketImpl::zero_copy_read(bufferptr&)
   return 0;
 }
 
-void UCXConnectedSocketImpl::send_completion_cb(void *req, ucs_status_t status)
-{
-  ucx_req_descr *desc = static_cast<ucx_req_descr *>(req);
-
-  UCXConnectedSocketImpl::send_completion(desc);
-  ucp_request_free(req);
-}
-
 void UCXConnectedSocketImpl::request_init(void *req)
 {
     ucx_req_descr *desc = static_cast<ucx_req_descr *>(req);
@@ -215,67 +188,8 @@ void UCXConnectedSocketImpl::request_cleanup(void *req)
 
 ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
 {
-    unsigned iov_cnt = bl.get_num_buffers();
-    unsigned total_len = bl.length();
-    ucx_req_descr *req;
-    int n;
-    ucp_dt_iov_t *iov_list;
-    char ll[256];
-
-    if (total_len == 0)  // TODO: shouldnt happen
-        return 0;
-
-//Vasily: 'more flag should be taken into account
-
-    if (NULL == ucp_ep) {
-        pending.push_back(&bl);
-        ldout(cct(), 10) << __func__ << " put send to the pending, fd: " << tcp_fd << dendl;
-
-        return 0; //return total_len; //Vasily: ?????
-    }
-
-    ldout(cct(), 10) << __func__ << " sending " << total_len
-                                 << " bytes. iov_cnt " << iov_cnt
-                                 << " to " << dst_tag << dendl;
-
-    std::list<bufferptr>::const_iterator i = bl.buffers().begin();
-    if (iov_cnt == 1) {
-    iov_list = 0;
-    req = static_cast<ucx_req_descr *>(ucp_tag_send_nb(ucp_ep,
-          i->c_str(), i->length(), ucp_dt_make_contig(1),
-          dst_tag, send_completion_cb));
-    } else {
-    n = 0;
-    // TODO: pool alloc, or ucx optimization...
-    iov_list = new ucp_dt_iov_t[iov_cnt];
-    for (n = 0; i != bl.buffers().end(); ++i, n++) {
-      iov_list[n].buffer = (void *)(i->c_str());
-      iov_list[n].length = i->length();
-      snprintf(ll, sizeof(ll), "iov %d: %p len %lu", n, iov_list[n].buffer, iov_list[n].length);
-      ldout(cct(), 15) << __func__ << " " << ll << dendl;
-    }
-
-    req = static_cast<ucx_req_descr *>(ucp_tag_send_nb(ucp_ep, iov_list, iov_cnt, ucp_dt_make_iov(),
-          dst_tag, send_completion_cb));
-    }
-
-    if (req == NULL) {
-        /* in place completion */
-        ldout(cct(), 0) << __func__ << " SENT IN PLACE " << dendl;
-        bl.clear();
-        return 0;
-    }
-
-    if (UCS_PTR_IS_ERR(req)) {
-        return -1;
-    }
-
-    req->bl->claim_append(bl);
-    req->iov_list = iov_list;
-
-    ldout(cct(), 10) << __func__ << " send in progress req " << req << dendl;
-
-    return 0;
+    UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+    return driver->send(tcp_fd, bl, more);
 }
 
 void UCXConnectedSocketImpl::shutdown()
@@ -285,7 +199,7 @@ void UCXConnectedSocketImpl::shutdown()
     ldout(cct(), 10) << __func__ << " conn fd: "
                      << tcp_fd << " is shutting down..." << dendl;
 
-    driver->conn_close(tcp_fd, ucp_ep);
+    driver->conn_close(tcp_fd);
 
     /*
      * We should care of cleaning UCX unexpected queue
