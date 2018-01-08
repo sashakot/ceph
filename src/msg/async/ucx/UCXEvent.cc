@@ -121,6 +121,7 @@ int UCXDriver::conn_create(int fd)
         send(fd, *bl, 0);
     }
 
+    assert(connections[fd].pending.empty());
     delete [] addr_buf; //Vasily: allocate it in this func ????
 
     connecting.erase(fd);
@@ -145,6 +146,11 @@ const ucp_generic_dt_ops_t DummyDataType::dummy_datatype_ops = {
 
 void UCXDriver::conn_close(int fd)
 {
+    if (!is_connected(fd)) {
+        ldout(cct, 0) << __func__ << " UCP ep is NULL, shut the connection down " << dendl;
+        return;
+    }
+
     ucs_status_ptr_t request;
     ucp_ep_h ucp_ep = connections[fd].ucp_ep;
 
@@ -152,8 +158,10 @@ void UCXDriver::conn_close(int fd)
                                << " is shutting down " << dendl;
 
     request = ucp_ep_close_nb(ucp_ep, UCP_EP_CLOSE_MODE_FLUSH);
-    if (UCS_PTR_IS_ERR(request)) {
-         lderr(cct) << __func__ << " ucp_ep_close_nb call failed " << dendl;
+    if (NULL == request) {
+        ldout(cct, 20) << __func__ << " ucp ep fd=" << fd << " closed in place........." << dendl;
+    } else if (UCS_PTR_IS_ERR(request)) {
+        lderr(cct) << __func__ << " ucp_ep_close_nb call failed " << dendl;
     } else if (UCS_PTR_STATUS(request) != UCS_OK) {
         /* Wait till the request finalizing */
         do {
@@ -179,12 +187,13 @@ void UCXDriver::conn_close(int fd)
 
 void UCXDriver::drop_events(int fd)
 {
+    uint64_t tag = static_cast<uint64_t>(fd);
+
     do {
         ucx_req_descr *req;
         ucp_tag_message_h msg;
 
         ucp_tag_recv_info_t msg_info;
-        uint64_t tag = static_cast<uint64_t>(fd);
 
         msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 1, &msg_info);
         if (NULL == msg) {
@@ -272,8 +281,8 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
         return 0; //return total_len; //Vasily: ?????
     }
 
-    ldout(cct, 20) << __func__ << " sending " << total_len
-                               << " bytes. iov_cnt " << iov_cnt
+    ldout(cct, 20) << __func__ << " fd=" << fd << " sending "
+                               << total_len << " bytes. iov_cnt " << iov_cnt
                                << " to " << connections[fd].dst_tag << dendl;
 
     std::list<bufferptr>::const_iterator i = bl.buffers().begin();
@@ -434,9 +443,6 @@ void UCXDriver::dispatch_rx(ucx_rx_buf *buf,
 
 void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
 {
-	ucp_tag_message_h msg;
-	ucp_tag_recv_info_t msg_info;
-
     if (connections.empty()) {
         ldout(cct, 20) << __func__ << " The connections list is empty " << dendl;
         return;
@@ -453,6 +459,9 @@ void UCXDriver::dispatch_events(vector<FiredFileEvent> &fired_events)
         ldout(cct, 20) << __func__ << " Trying recv for fd = " << fd << dendl;
 
         while (true) {
+            ucp_tag_message_h msg;
+            ucp_tag_recv_info_t msg_info;
+
             msg = ucp_tag_probe_nb(ucp_worker, tag, -1, 1, &msg_info);
             if (NULL == msg) {
                 break;
@@ -495,7 +504,7 @@ int UCXDriver::init(EventCenter *c, int nevent)
 
 int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 {
-    ldout(cct, 0) << __func__ << " fd = " << fd << dendl;
+    ldout(cct, 20) << __func__ << " fd = " << fd << " read ? " << (EVENT_READABLE & add_mask) << dendl;
 
     if (EVENT_READABLE & add_mask &&
                         is_connected(fd)) {
@@ -509,7 +518,7 @@ int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 
 int UCXDriver::del_event(int fd, int cur_mask, int delmask)
 {
-    ldout(cct, 0) << __func__ << " fd = " << fd << dendl;
+    ldout(cct, 20) << __func__ << " fd = " << fd << " read ? " << (EVENT_READABLE & delmask) << dendl;
 
     if (EVENT_READABLE & delmask &&
                         is_connected(fd)) {

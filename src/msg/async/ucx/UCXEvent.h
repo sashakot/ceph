@@ -75,7 +75,7 @@ class DummyDataType {
 typedef struct {
     uint64_t  dst_tag;
     ucp_ep_h  ucp_ep;
-    std::deque<bufferlist*> pending;
+    std::deque<bufferlist *> pending;
     std::deque<ucx_rx_buf *> rx_queue;
 } connection_t;
 
