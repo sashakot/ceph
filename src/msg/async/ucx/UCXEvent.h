@@ -15,7 +15,7 @@ struct ucx_rx_buf {
     size_t length;
     size_t offset;
 
-    char data[0];
+    uint8_t *rdata;
 };
 
 struct ucx_req_descr {
@@ -25,55 +25,8 @@ struct ucx_req_descr {
     void *rx_queue;
 };
 
-class DummyDataType {
-    public:
-        DummyDataType() {
-            ucs_status_t status = ucp_dt_create_generic(
-                                            &dummy_datatype_ops,
-                                            NULL, &ucp_datatype);
-            if (status != UCS_OK) {
-                ceph_abort();
-            }
-        };
-
-        ~DummyDataType() {
-            ucp_dt_destroy(ucp_datatype);
-        }
-
-        static void* dummy_start_cb(void *context,
-                                    void *buffer,
-                                    size_t count) {
-            return NULL;
-        }
-
-        static size_t dummy_pack_cb(void *state, size_t offset,
-                                    void *dest, size_t max_length) {
-            return max_length;
-        }
-
-        static ucs_status_t dummy_unpack_cb(void *state, size_t offset,
-                                            const void *src, size_t count) {
-            return UCS_OK;
-        }
-
-        static size_t dummy_datatype_packed_size(void *state) {
-            return 0;
-        }
-
-        static void dummy_datatype_finish(void *state) {
-        }
-
-        static void dummy_completion_cb(void *req, ucs_status_t status,
-                                 ucp_tag_recv_info_t *info) {
-             ucp_request_free(req);
-        }
-
-        ucp_datatype_t ucp_datatype;
-        static const ucp_generic_dt_ops_t dummy_datatype_ops;
-};
-
 typedef struct {
-    uint64_t  dst_tag;
+    uint64_t  dst_tag;  //Vasily: remove it
     ucp_ep_h  ucp_ep;
     std::deque<bufferlist *> pending;
     std::deque<ucx_rx_buf *> rx_queue;
@@ -93,17 +46,12 @@ class UCXDriver : public EpollDriver {
 
         std::map<int, connection_t> connections;
 
-        DummyDataType dummy_dtype;
-
         void event_progress(vector<FiredFileEvent> &fired_events);
         void dispatch_events(vector<FiredFileEvent> &fired_events);
 
-        void insert_zero_msg(int fd);
+        void insert_rx(int fd, uint8_t *rdata, size_t length);
         void recv_msg(int fd, ucp_tag_message_h msg,
                       ucp_tag_recv_info_t &msg_info);
-
-        static void dispatch_rx(ucx_rx_buf *buf,
-                                void *qptr);
 
         bool in_set(std::set<int> set, int fd) {
             return set.find(fd) != set.end();
@@ -115,9 +63,10 @@ class UCXDriver : public EpollDriver {
                       size_t ucp_addr_len);
 
         int conn_create(int fd);
+        int recv_stream(int fd);
 
     public:
-        UCXDriver(CephContext *c): EpollDriver(c), cct(c), dummy_dtype() {}
+        UCXDriver(CephContext *c): EpollDriver(c), cct(c) {}
         virtual ~UCXDriver();
 
         int init(EventCenter *c, int nevent) override;
@@ -135,11 +84,7 @@ class UCXDriver : public EpollDriver {
                            ucp_address_t *ucp_addr,
                            size_t ucp_addr_len);
 
-        void drop_events(int fd);
         void conn_close(int fd);
-
-        ucx_rx_buf *get_rx_buf(int fd);
-        void pop_rx_buf(int fd);
 
         int is_connected(int fd) {
             return (connections.count(fd) > 0 &&
@@ -156,9 +101,7 @@ class UCXDriver : public EpollDriver {
             }
         }
 
-        static void recv_completion_cb(void *request,
-                                       ucs_status_t status,
-                                       ucp_tag_recv_info_t *info);
+        int read(int fd, char *rbuf, size_t bytes);
 };
 
 
