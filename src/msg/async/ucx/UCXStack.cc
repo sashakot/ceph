@@ -135,34 +135,7 @@ ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
 {
     UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
 
-    ucx_rx_buf *rx_buf = driver->get_rx_buf(tcp_fd);
-    if (NULL == rx_buf) {
-        return -EAGAIN;
-    }
-
-    if (!rx_buf->length) {
-        driver->pop_rx_buf(tcp_fd);
-        return 0;
-    }
-
-    size_t left = rx_buf->length - rx_buf->offset;
-
-    ldout(cct(), 10) << __func__ << " read to " << (void *)buf << " wanted "
-                                 << len << " left " << left << " rx_buf = "
-                                 << (void *)rx_buf << " rx_buf->length = "
-                                 << rx_buf->length << dendl;
-
-    if (len < left) {
-        memcpy(buf, rx_buf->data + rx_buf->offset, len);
-        rx_buf->offset += len;
-        return len;
-    }
-
-    // TODO: copy more data
-    memcpy(buf, rx_buf->data + rx_buf->offset, left);
-    driver->pop_rx_buf(tcp_fd);
-
-    return left;
+    return driver->read(tcp_fd, buf, len);
 }
 
 ssize_t UCXConnectedSocketImpl::zero_copy_read(bufferptr&)
@@ -200,12 +173,6 @@ void UCXConnectedSocketImpl::shutdown()
                      << tcp_fd << " is shutting down..." << dendl;
 
     driver->conn_close(tcp_fd);
-
-    /*
-     * We should care of cleaning UCX unexpected queue
-     * from the messages of just closed UCX ep
-     */
-    driver->drop_events(tcp_fd);
 
     ::close(tcp_fd);
     tcp_fd = -1;
@@ -383,13 +350,16 @@ UCXStack::UCXStack(CephContext *cct, const string &t) :
     }
 
     memset(&params, 0, sizeof(params));
-    params.field_mask = UCP_PARAM_FIELD_FEATURES|
-                        UCP_PARAM_FIELD_REQUEST_SIZE|
-                        UCP_PARAM_FIELD_REQUEST_INIT|
-                        UCP_PARAM_FIELD_REQUEST_CLEANUP|
-                        UCP_PARAM_FIELD_TAG_SENDER_MASK|
+    params.field_mask = UCP_PARAM_FIELD_FEATURES        |
+                        UCP_PARAM_FIELD_REQUEST_SIZE    |
+                        UCP_PARAM_FIELD_REQUEST_INIT    |
+                        UCP_PARAM_FIELD_REQUEST_CLEANUP |
+                        UCP_PARAM_FIELD_TAG_SENDER_MASK |
                         UCP_PARAM_FIELD_MT_WORKERS_SHARED;
-    params.features   = UCP_FEATURE_TAG|UCP_FEATURE_WAKEUP;
+
+    params.features   = UCP_FEATURE_WAKEUP |
+                        UCP_FEATURE_STREAM;
+
     params.mt_workers_shared = 1;
     params.tag_sender_mask = -1;
     params.request_size    = sizeof(ucx_req_descr);
