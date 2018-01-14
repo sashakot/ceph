@@ -25,8 +25,11 @@ struct ucx_req_descr {
     void *rx_queue;
 };
 
+struct ucx_connect_message {
+    uint16_t addr_len;
+} __attribute__ ((packed));
+
 typedef struct {
-    uint64_t  dst_tag;  //Vasily: remove it
     ucp_ep_h  ucp_ep;
     std::deque<bufferlist *> pending;
     std::deque<ucx_rx_buf *> rx_queue;
@@ -50,15 +53,13 @@ class UCXDriver : public EpollDriver {
         void dispatch_events(vector<FiredFileEvent> &fired_events);
 
         void insert_rx(int fd, uint8_t *rdata, size_t length);
-        void recv_msg(int fd, ucp_tag_message_h msg,
-                      ucp_tag_recv_info_t &msg_info);
 
         bool in_set(std::set<int> set, int fd) {
             return set.find(fd) != set.end();
         }
 
-        char *recv_addr(int fd, uint64_t *dst_tag);
-        int send_addr(int fd, uint64_t tag,
+        char *recv_addr(int fd);
+        int send_addr(int fd,
                       ucp_address_t *ucp_addr,
                       size_t ucp_addr_len);
 

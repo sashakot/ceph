@@ -35,11 +35,6 @@ extern "C" {
 class UCXStack;
 class UCXConnectedSocketImpl;
 
-struct ucx_connect_message {
-  uint64_t tag;
-  uint16_t addr_len;
-} __attribute__ ((packed));
-
 class UCXWorker : public Worker {
     UCXStack *stack;
     ucp_address_t *ucp_addr;

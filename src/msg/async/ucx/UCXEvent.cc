@@ -8,7 +8,7 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "UCXDriver "
 
-int UCXDriver::send_addr(int fd, uint64_t tag,
+int UCXDriver::send_addr(int fd,
                          ucp_address_t *ucp_addr,
                          size_t ucp_addr_len)
 {
@@ -16,8 +16,7 @@ int UCXDriver::send_addr(int fd, uint64_t tag,
     ucx_connect_message msg;
 
     /* Send connected message */
-    msg.tag      = tag;
-    msg.addr_len = ucp_addr_len;
+    msg.addr_len = ucp_addr_len; //Vasily: if I need to exchange it ?????
 
     //Vasily: write in network order
     rc = ::write(fd, &msg, sizeof(msg));
@@ -44,7 +43,7 @@ int UCXDriver::conn_establish(int fd,
 {
     ldout(cct, 10) << __func__ << " fd = " << fd << " start connecting " << dendl;
 
-    int rc = send_addr(fd, static_cast<uint64_t>(fd), ucp_addr, ucp_addr_len);
+    int rc = send_addr(fd, ucp_addr, ucp_addr_len);
     if (rc < 0) {
         return rc;
     }
@@ -56,7 +55,7 @@ int UCXDriver::conn_establish(int fd,
     return 0;
 }
 
-char *UCXDriver::recv_addr(int fd, uint64_t *dst_tag)
+char *UCXDriver::recv_addr(int fd)
 {
     int rc;
     char *addr_buf;
@@ -74,10 +73,8 @@ char *UCXDriver::recv_addr(int fd, uint64_t *dst_tag)
         return NULL;
     }
 
-    ldout(cct, 10) << __func__ << " received tag: "
-                   << msg.tag << " addr len: " << msg.addr_len << dendl;
+    ldout(cct, 10) << __func__ << " addr len: " << msg.addr_len << dendl;
 
-    *dst_tag = msg.tag;
     addr_buf = new char [msg.addr_len];
 
     rc = ::read(fd, addr_buf, msg.addr_len);
@@ -99,7 +96,7 @@ int UCXDriver::conn_create(int fd)
     ldout(cct, 20) << __func__ << " conn for fd = " << fd
                                << " is creating " << dendl;
 
-    char *addr_buf = recv_addr(fd, &conn.dst_tag);
+    char *addr_buf = recv_addr(fd);
     if (!addr_buf) {
         return -EINVAL;
     }
@@ -168,6 +165,7 @@ void UCXDriver::conn_close(int fd)
         ucp_request_free(request);
     }
 
+    //Vasily: while (ucp_worker_progress(ucp_worker));
     std::deque<ucx_rx_buf *> &rx_queue = connections[fd].rx_queue;
 
     /* Free all undelivered receives */
@@ -250,8 +248,8 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
     }
 
     ldout(cct, 20) << __func__ << " fd=" << fd << " sending "
-                               << total_len << " bytes. iov_cnt " << iov_cnt
-                               << " to " << connections[fd].dst_tag << dendl;
+                               << total_len << " bytes. iov_cnt "
+                               << iov_cnt << dendl;
 
     std::list<bufferptr>::const_iterator i = bl.buffers().begin();
 
@@ -331,19 +329,21 @@ int UCXDriver::recv_stream(int fd)
 
     assert(ucp_ep);
 
-    uint8_t *rdata =
-        reinterpret_cast<uint8_t *>(ucp_stream_recv_data_nb(ucp_ep, &length));
-    if (UCS_PTR_IS_ERR(rdata)) {
-        lderr(cct) << __func__ << " failed to receive data from UCP stream " << dendl;
-        return -EINVAL;
-    }
+    while (true) {
+        uint8_t *rdata =
+            reinterpret_cast<uint8_t *>(ucp_stream_recv_data_nb(ucp_ep, &length));
+        if (UCS_PTR_IS_ERR(rdata)) {
+            lderr(cct) << __func__ << " failed to receive data from UCP stream " << dendl;
+            return -EINVAL;
+        }
 
-    /* receive nothing */
-    if (UCS_PTR_STATUS(rdata) == UCS_OK) {
-        return 0;
-    }
+        /* receive nothing */
+        if (UCS_PTR_STATUS(rdata) == UCS_OK) {
+            break;
+        }
 
-    insert_rx(fd, rdata, length);
+        insert_rx(fd, rdata, length);
+    }
 
     return 0;
 }
@@ -359,6 +359,7 @@ int UCXDriver::read(int fd, char *rbuf, size_t bytes)
 
     ucx_rx_buf *rx_buf = rx_queue.front();
     if (!rx_buf->length) {
+        ldout(cct, 20) << __func__ << " fd=" << fd << " Zero length packet..." << dendl;
         goto erase_buf;
     }
 
