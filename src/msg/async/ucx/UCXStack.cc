@@ -37,14 +37,10 @@ int UCXConnectedSocketImpl::is_connected()
     return driver->is_connected(tcp_fd);
 }
 
-// TODO: consider doing a completely non blockig connect/accept
-//do blocking connect
 int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const SocketOptions &opts)
 {
     NetHandler net(cct());
     int ret;
-
-    lderr(cct()) << __func__ << dendl;
 
     tcp_fd = net.connect(peer_addr, opts.connect_bind_addr);
     if (tcp_fd < 0) {
@@ -75,7 +71,6 @@ err:
     return ret;
 }
 
-// do blocking accept()
 int UCXConnectedSocketImpl::accept(int server_sock,
                                    entity_addr_t *out,
                                    const SocketOptions &opt)
@@ -86,7 +81,6 @@ int UCXConnectedSocketImpl::accept(int server_sock,
     sockaddr_storage ss;
     socklen_t slen = sizeof(ss);
 
-    lderr(cct()) << __func__ << " 3 " << dendl;
 
     tcp_fd = ::accept(server_sock, (sockaddr*)&ss, &slen);
     if (tcp_fd < 0) {
@@ -102,13 +96,10 @@ int UCXConnectedSocketImpl::accept(int server_sock,
         goto err;
     }
 
-    lderr(cct()) << __func__ << " 2 " << dendl;
     assert(NULL != out); //out should not be NULL in accept connection
 
     out->set_sockaddr((sockaddr*)&ss);
     net.set_priority(tcp_fd, opt.priority, out->get_family());
-
-    lderr(cct()) << __func__ << " 1 " << dendl;
 
     ret = worker->conn_establish(tcp_fd);
     if (ret != 0) {
@@ -140,8 +131,8 @@ ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
 
 ssize_t UCXConnectedSocketImpl::zero_copy_read(bufferptr&)
 {
-  lderr(cct()) << __func__ << dendl;
-  return 0;
+    lderr(cct()) << __func__ << dendl;
+    return 0;
 }
 
 void UCXConnectedSocketImpl::request_init(void *req)
@@ -154,9 +145,9 @@ void UCXConnectedSocketImpl::request_init(void *req)
 
 void UCXConnectedSocketImpl::request_cleanup(void *req)
 {
-  ucx_req_descr *desc = static_cast<ucx_req_descr *>(req);
+    ucx_req_descr *desc = static_cast<ucx_req_descr *>(req);
 
-  delete desc->bl;
+    delete desc->bl;
 }
 
 ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
@@ -183,15 +174,15 @@ void UCXConnectedSocketImpl::close()
     lderr(cct()) << __func__ << dendl;
 }
 
-UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w) :
-  worker(w)
+UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w) : worker(w)
 {
 }
 
 UCXServerSocketImpl::~UCXServerSocketImpl()
 {
-    if (server_setup_socket >= 0)
+    if (server_setup_socket >= 0) {
         ::close(server_setup_socket);
+    }
 }
 
 int UCXServerSocketImpl::listen(entity_addr_t &sa, const SocketOptions &opt)
@@ -256,14 +247,14 @@ int UCXServerSocketImpl::accept(ConnectedSocket *sock, const SocketOptions &opt,
 
 void UCXServerSocketImpl::abort_accept()
 {
-    if (server_setup_socket >= 0)
+    if (server_setup_socket >= 0) {
         ::close(server_setup_socket);
+    }
 
     server_setup_socket = -1;
 }
 
-UCXWorker::UCXWorker(CephContext *c, unsigned i) :
-  Worker(c, i)
+UCXWorker::UCXWorker(CephContext *c, unsigned i) : Worker(c, i)
 {
 }
 
@@ -273,16 +264,16 @@ UCXWorker::~UCXWorker()
 
 int UCXWorker::listen(entity_addr_t &addr, const SocketOptions &opts, ServerSocket *sock)
 {
-  UCXServerSocketImpl *p = new UCXServerSocketImpl(this);
+    UCXServerSocketImpl *p = new UCXServerSocketImpl(this);
 
-  int r = p->listen(addr, opts);
-  if (r < 0) {
-    delete p;
-    return r;
-  }
+    int r = p->listen(addr, opts);
+    if (r < 0) {
+        delete p;
+        return r;
+    }
 
-  *sock = ServerSocket(std::unique_ptr<ServerSocketImpl>(p));
-  return 0;
+    *sock = ServerSocket(std::unique_ptr<ServerSocketImpl>(p));
+    return 0;
 }
 
 int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *sock)
@@ -317,11 +308,10 @@ void UCXWorker::destroy()
 
 void UCXWorker::set_stack(UCXStack *s)
 {
-  stack = s;
+    stack = s;
 }
 
-UCXStack::UCXStack(CephContext *cct, const string &t) :
-   NetworkStack(cct, t)
+UCXStack::UCXStack(CephContext *cct, const string &t) : NetworkStack(cct, t)
 {
 
     ucs_status_t status;
@@ -345,8 +335,8 @@ UCXStack::UCXStack(CephContext *cct, const string &t) :
 
     status = ucp_config_read("CEPH", NULL, &ucp_config);
     if (UCS_OK != status) {
-      lderr(cct) << __func__ << "failed to read UCP config" << dendl;
-      ceph_abort();
+        lderr(cct) << __func__ << "failed to read UCP config" << dendl;
+        ceph_abort();
     }
 
     memset(&params, 0, sizeof(params));
@@ -369,30 +359,30 @@ UCXStack::UCXStack(CephContext *cct, const string &t) :
     status = ucp_init(&params, ucp_config, &ucp_context);
     ucp_config_release(ucp_config);
     if (UCS_OK != status) {
-      lderr(cct) << __func__ << "failed to init UCP context" << dendl;
-      ceph_abort();
+        lderr(cct) << __func__ << "failed to init UCP context" << dendl;
+        ceph_abort();
     }
     ucp_context_print_info(ucp_context, stdout);
 
     for (unsigned i = 0; i < get_num_worker(); i++) {
-      UCXWorker *w = dynamic_cast<UCXWorker *>(get_worker(i));
-      w->set_stack(this);
+        UCXWorker *w = dynamic_cast<UCXWorker *>(get_worker(i));
+        w->set_stack(this);
     }
 }
 
 UCXStack::~UCXStack()
 {
-  ucp_cleanup(ucp_context);
+    ucp_cleanup(ucp_context);
 }
 
 void UCXStack::spawn_worker(unsigned i, std::function<void ()> &&func)
 {
-  threads.resize(i+1);
-  threads[i] = std::thread(func);
+    threads.resize(i+1);
+    threads[i] = std::thread(func);
 }
 
 void UCXStack::join_worker(unsigned i)
 {
-  assert(threads.size() > i && threads[i].joinable());
-  threads[i].join();
+    assert(threads.size() > i && threads[i].joinable());
+    threads[i].join();
 }

@@ -61,7 +61,7 @@ public:
 };
 
 class UCXConnectedSocketImpl : public ConnectedSocketImpl {
-  private:
+private:
     UCXWorker *worker;
 
     int tcp_fd;
@@ -69,7 +69,7 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
 
     CephContext *cct() { return worker->cct; }
 
-  public:
+public:
     UCXConnectedSocketImpl(UCXWorker *w);
     virtual ~UCXConnectedSocketImpl();
 
@@ -91,12 +91,12 @@ class UCXConnectedSocketImpl : public ConnectedSocketImpl {
 };
 
 class UCXServerSocketImpl : public ServerSocketImpl {
-  private:
+private:
     UCXWorker *worker;
     int server_setup_socket = -1;
 
     CephContext *cct() { return worker->cct; }
-  public:
+public:
     UCXServerSocketImpl(UCXWorker *w);
     ~UCXServerSocketImpl();
 
@@ -110,18 +110,18 @@ class UCXServerSocketImpl : public ServerSocketImpl {
 };
 
 class UCXStack : public NetworkStack {
-  vector<std::thread> threads;
-  ucp_context_h ucp_context;
- public:
-  explicit UCXStack(CephContext *cct, const string &t);
-  virtual ~UCXStack();
-  virtual bool support_zero_copy_read() const override { return false; }
-  virtual bool nonblock_connect_need_writable_event() const { return false; }
+    vector<std::thread> threads;
+    ucp_context_h ucp_context;
+public:
+    explicit UCXStack(CephContext *cct, const string &t);
+    virtual ~UCXStack();
+    virtual bool support_zero_copy_read() const override { return false; }
+    virtual bool nonblock_connect_need_writable_event() const { return false; }
 
-  virtual void spawn_worker(unsigned i, std::function<void ()> &&func) override;
-  virtual void join_worker(unsigned i) override;
+    virtual void spawn_worker(unsigned i, std::function<void ()> &&func) override;
+    virtual void join_worker(unsigned i) override;
 
-  ucp_context_h get_ucp_context() { return ucp_context; }
+    ucp_context_h get_ucp_context() { return ucp_context; }
 };
 
 #endif
