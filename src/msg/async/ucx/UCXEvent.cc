@@ -48,8 +48,7 @@ int UCXDriver::conn_establish(int fd,
         return rc;
     }
 
-//Vasily: lock here ??????
-
+    //Vasily: could be called by another thread (not worker) from the server side => need use lock for this insertion
     connecting.insert(fd);
 
     return 0;
@@ -280,6 +279,11 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
     if (req == NULL) {
         /* in place completion */
         ldout(cct, 20) << __func__ << " SENT IN PLACE " << dendl;
+
+        if (iov_list) {
+           delete iov_list;
+        }
+
         bl.clear();
         return 0;
     }
