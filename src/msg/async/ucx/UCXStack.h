@@ -65,8 +65,6 @@ private:
     UCXWorker *worker;
 
     int tcp_fd;
-    int state; //Vasily: ??????
-
     CephContext *cct() { return worker->cct; }
 
 public:

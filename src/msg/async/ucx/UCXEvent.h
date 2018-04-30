@@ -7,6 +7,8 @@
 #include "msg/async/Event.h"
 #include "msg/async/EventEpoll.h"
 
+#include "common/Mutex.h"
+
 extern "C" {
 #include <ucp/api/ucp.h>
 };
@@ -27,6 +29,7 @@ struct ucx_req_descr {
 
 struct ucx_connect_message {
     uint16_t addr_len;
+    uint32_t remote_fd;
 } __attribute__ ((packed));
 
 typedef struct {
@@ -43,6 +46,8 @@ class UCXDriver : public EpollDriver {
 
         int ucp_fd = -1;
         ucp_worker_h ucp_worker;
+
+        Mutex lock; /* Protects 'connecting' pool */
 
         std::set<int> connecting;
         std::set<int> waiting_events;
@@ -66,8 +71,11 @@ class UCXDriver : public EpollDriver {
         int conn_create(int fd);
         int recv_stream(int fd);
 
+        void conn_release_recvs(int fd);
+
     public:
-        UCXDriver(CephContext *c): EpollDriver(c), cct(c) {}
+        UCXDriver(CephContext *c): EpollDriver(c), cct(c),
+                                   lock("UCXDriver::lock") {}
         virtual ~UCXDriver();
 
         int init(EventCenter *c, int nevent) override;
@@ -86,6 +94,7 @@ class UCXDriver : public EpollDriver {
                            size_t ucp_addr_len);
 
         void conn_close(int fd);
+        void conn_shutdown(int fd);
 
         int is_connected(int fd) {
             return (connections.count(fd) > 0 &&
