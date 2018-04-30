@@ -22,13 +22,39 @@
 #define dout_prefix *_dout << "UCXStack "
 
 
-UCXConnectedSocketImpl::UCXConnectedSocketImpl(UCXWorker *w) :
-  worker(w)
+UCXConnectedSocketImpl::UCXConnectedSocketImpl(UCXWorker *w) : worker(w)
 {
+}
+
+void UCXConnectedSocketImpl::shutdown()
+{
+    ldout(cct(), 20) << __func__ << " conn fd: "
+                     << tcp_fd << " is shutting down..." << dendl;
+
+    if (tcp_fd > 0) {
+        UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+        driver->conn_shutdown(tcp_fd);
+    }
+}
+
+void UCXConnectedSocketImpl::close()
+{
+    UCXConnectedSocketImpl::shutdown();
+
+    if (tcp_fd > 0) {
+        ldout(cct(), 20) << __func__ << " fd: " << tcp_fd << dendl;
+
+        UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+        driver->conn_close(tcp_fd);
+
+        ::close(tcp_fd);
+        tcp_fd = -1;
+    }
 }
 
 UCXConnectedSocketImpl::~UCXConnectedSocketImpl()
 {
+    UCXConnectedSocketImpl::close();
 }
 
 int UCXConnectedSocketImpl::is_connected()
@@ -44,31 +70,29 @@ int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const Socket
 
     tcp_fd = net.connect(peer_addr, opts.connect_bind_addr);
     if (tcp_fd < 0) {
+        lderr(cct()) << __func__ << " failed to allocate client socket" << dendl;
         return -errno;
     }
 
-    ldout(cct(), 20) << __func__ << " tcp_fd: " << tcp_fd << dendl;
+    ldout(cct(), 20) << __func__<< " server addr: " << peer_addr << " tcp_fd: " << tcp_fd << dendl;
     net.set_close_on_exec(tcp_fd);
 
     ret = net.set_socket_options(tcp_fd, opts.nodelay, opts.rcbuf_size);
     if (ret < 0) {
+        ::close(tcp_fd);
+        tcp_fd = -1;
         lderr(cct()) << __func__ << " failed to set socket options" << dendl;
-        goto err;
+        return -errno;
     }
 
     net.set_priority(tcp_fd, opts.priority, peer_addr.get_family()); //Vasily: ??????
 
-    ret =  worker->conn_establish(tcp_fd);
-    if (ret != 0) {
-        goto err;
+    ret = worker->conn_establish(tcp_fd);
+    if (ret < 0) {
+        return ret;
     }
 
     return 0;
-err:
-    ::close(tcp_fd);
-    tcp_fd = -1;
-
-    return ret;
 }
 
 int UCXConnectedSocketImpl::accept(int server_sock,
@@ -81,7 +105,6 @@ int UCXConnectedSocketImpl::accept(int server_sock,
     sockaddr_storage ss;
     socklen_t slen = sizeof(ss);
 
-
     tcp_fd = ::accept(server_sock, (sockaddr*)&ss, &slen);
     if (tcp_fd < 0) {
         return -errno;
@@ -89,11 +112,12 @@ int UCXConnectedSocketImpl::accept(int server_sock,
 
     net.set_close_on_exec(tcp_fd);
 
-    lderr(cct()) << __func__ << " 4 " << dendl;
     ret = net.set_socket_options(tcp_fd, opt.nodelay, opt.rcbuf_size);
     if (ret < 0) {
-        ret = -errno;
-        goto err;
+        ::close(tcp_fd);
+        tcp_fd = -1;
+
+        return -errno;
     }
 
     assert(NULL != out); //out should not be NULL in accept connection
@@ -102,19 +126,11 @@ int UCXConnectedSocketImpl::accept(int server_sock,
     net.set_priority(tcp_fd, opt.priority, out->get_family());
 
     ret = worker->conn_establish(tcp_fd);
-    if (ret != 0) {
-        goto err;
+    if (ret < 0) {
+        return ret;
     }
 
-    lderr(cct()) << __func__ << " Start connecting UCP endpoint " << dendl;
-
     return 0;
-err:
-    ::close(tcp_fd);
-    tcp_fd = -1;
-    lderr(cct()) << __func__ << " failed accept " << ret << dendl;
-
-    return ret;
 }
 
 int UCXWorker::conn_establish(int fd)
@@ -125,7 +141,6 @@ int UCXWorker::conn_establish(int fd)
 ssize_t UCXConnectedSocketImpl::read(int fd_or_id, char *buf, size_t len)
 {
     UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
-
     return driver->read(tcp_fd, buf, len);
 }
 
@@ -156,24 +171,6 @@ ssize_t UCXConnectedSocketImpl::send(bufferlist &bl, bool more)
     return driver->send(tcp_fd, bl, more);
 }
 
-void UCXConnectedSocketImpl::shutdown()
-{
-    UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
-
-    ldout(cct(), 10) << __func__ << " conn fd: "
-                     << tcp_fd << " is shutting down..." << dendl;
-
-    driver->conn_close(tcp_fd);
-
-    ::close(tcp_fd);
-    tcp_fd = -1;
-}
-
-void UCXConnectedSocketImpl::close()
-{
-    lderr(cct()) << __func__ << dendl;
-}
-
 UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w) : worker(w)
 {
 }
@@ -192,8 +189,8 @@ int UCXServerSocketImpl::listen(entity_addr_t &sa, const SocketOptions &opt)
 
     server_setup_socket = net.create_socket(sa.get_family(), true);
     if (server_setup_socket < 0) {
-        lderr(cct()) << __func__ << " failed to create server socket: "
-                     << cpp_strerror(errno) << dendl;
+        ldout(cct(), 1)  << __func__ << " failed to create server socket: "
+                         << cpp_strerror(errno) << dendl;
         return -errno;
     }
 
@@ -217,7 +214,9 @@ int UCXServerSocketImpl::listen(entity_addr_t &sa, const SocketOptions &opt)
         goto err;
     }
 
-    ldout(cct(), 20) << __func__ << " bind to " << sa.get_sockaddr() << " on port " << sa.get_port()  << dendl;
+    ldout(cct(), 20) << __func__ << " bind server addr " << sa
+                     << " to server socket " << server_setup_socket << dendl;
+
     return 0;
 
 err:
@@ -233,7 +232,8 @@ int UCXServerSocketImpl::accept(ConnectedSocket *sock, const SocketOptions &opt,
 
     int r = p->accept(server_setup_socket, out, opt);
     if (r < 0) {
-        ldout(cct(), 1) << __func__ << " accept failed. ret = " << r << dendl;
+        ldout(cct(), 1) << __func__ << " accept failed on server socket: "
+                        << server_setup_socket << dendl;
         delete p;
 
         return r;
