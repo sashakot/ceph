@@ -42,8 +42,6 @@ class UCXDriver : public EpollDriver {
     private:
         CephContext *cct;
 
-        int undelivered = 0;
-
         int ucp_fd = -1;
         ucp_worker_h ucp_worker;
 
@@ -52,6 +50,7 @@ class UCXDriver : public EpollDriver {
         std::set<int> connecting;
         std::set<int> waiting_events;
 
+        std::set<int> undelivered;
         std::map<int, connection_t> connections;
 
         void event_progress(vector<FiredFileEvent> &fired_events);
