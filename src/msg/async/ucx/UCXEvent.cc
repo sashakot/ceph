@@ -268,7 +268,7 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
 
     assert(fd > 0);
 
-    if (total_len == 0) {// TODO: shouldn't happen
+    if (total_len == 0) {
         return 0;
     }
 
@@ -276,7 +276,7 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
         connections[fd].pending.push_back(&bl);
         ldout(cct, 20) << __func__ << " put send to the pending, fd: " << fd << dendl;
 
-        return 0;
+        return total_len;
     }
 
     ldout(cct, 20) << __func__ << " fd: " << fd << " sending "
@@ -331,7 +331,7 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
 
     ldout(cct, 10) << __func__ << " send in progress req " << req << dendl;
 
-    return 0;
+    return total_len;
 }
 
 void UCXDriver::send_completion_cb(void *req, ucs_status_t status)
@@ -404,7 +404,8 @@ int UCXDriver::read(int fd, char *rbuf, size_t bytes)
     }
 
     left = rx_buf->length - rx_buf->offset;
-    ldout(cct, 20) << __func__ << " read to " << (void *)rbuf << " wanted "
+    ldout(cct, 20) << __func__ << " fd: " << fd << " read to "
+                               << (void *)rbuf << " wanted "
                                << bytes << " left " << left << " rx_buf = "
                                << (void *)rx_buf << " rx_buf->length = "
                                << rx_buf->length << dendl;
