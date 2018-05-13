@@ -85,13 +85,63 @@ char *UCXDriver::recv_addr(int fd)
     return addr_buf;
 }
 
+void UCXDriver::ucx_ep_close(int fd, bool close_event)
+{
+    if (is_connected(fd)) {
+        ucp_ep_h ucp_ep = connections[fd].ucp_ep;
+
+        assert(NULL != ucp_ep);
+        ldout(cct, 20) << __func__ << " fd: " << fd
+                       << " ep=" << (void *)ucp_ep << dendl;
+
+        conn_release_recvs(fd);
+
+        ucs_status_ptr_t request =
+                ucp_ep_close_nb(ucp_ep, UCP_EP_CLOSE_MODE_SYNC);
+        if (NULL == request) {
+            ldout(cct, 20) << __func__ << " ucp ep fd: "
+                           << fd << " closed in place..." << dendl;
+        } else if (UCS_PTR_IS_ERR(request)) {
+            lderr(cct) << __func__ << " fd: " << fd
+                       << " ucp_ep_close_nb call failed: err "
+                       << ucs_status_string(UCS_PTR_STATUS(request)) << dendl;
+            ceph_abort(); //Vasily: ????
+        }
+
+        connections[fd].ucp_ep = NULL;
+        connections[fd].close_request = request;
+
+        if (close_event) {
+            insert_rx(fd, NULL, 0);
+        }
+    }
+
+    ldout(cct, 20) << __func__ << " fd: " << fd << " exit..." << dendl;
+}
+
+void UCXDriver::ucx_event_cb(void *arg, ucp_ep_h ep, ucs_status_t status)
+{
+    ucx_event_arg_t *ctx = reinterpret_cast<ucx_event_arg_t *>(arg);
+
+    int fd = ctx->fd;
+    UCXDriver *driver = ctx->driver;
+
+    assert(NULL == driver->connections[fd].ucp_ep ||
+                        ep == driver->connections[fd].ucp_ep);
+
+    driver->ucx_ep_close(fd, true);
+    delete ctx; //Vasily: if this callback is called always ??? leak if no
+}
+
 int UCXDriver::conn_create(int fd)
 {
     ucs_status_t status;
     ucp_ep_params_t params;
 
-    assert(!is_connected(fd));
     connection_t &conn = connections[fd];
+
+    assert(!is_connected(fd));
+    assert(!conn.close_request);
 
     ldout(cct, 20) << __func__ << " conn for fd: " << fd
                                << " is creating " << dendl;
@@ -101,14 +151,22 @@ int UCXDriver::conn_create(int fd)
         return -EINVAL;
     }
 
-    params.user_data  = reinterpret_cast<void *>(fd);
-    params.address    = reinterpret_cast<ucp_address_t *>(addr_buf);
+    ucx_event_arg_t *arg = new ucx_event_arg_t;
 
-    params.flags      = UCP_EP_PARAMS_FLAGS_NO_LOOPBACK;
+    arg->fd = fd;
+    arg->driver = this;
 
-    params.field_mask = UCP_EP_PARAM_FIELD_FLAGS     |
-                        UCP_EP_PARAM_FIELD_USER_DATA |
-                        UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
+    params.user_data      = reinterpret_cast<void *>(arg);
+    params.address        = reinterpret_cast<ucp_address_t *>(addr_buf);
+
+    params.err_handler.cb = ucx_event_cb;
+    params.flags          = UCP_EP_PARAMS_FLAGS_NO_LOOPBACK;
+
+
+    params.field_mask     = UCP_EP_PARAM_FIELD_FLAGS       |
+                            UCP_EP_PARAM_FIELD_USER_DATA   |
+                            UCP_EP_PARAM_FIELD_ERR_HANDLER |
+                            UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
 
     status = ucp_ep_create(ucp_worker, &params, &conn.ucp_ep);
     if (UCS_OK != status) {
@@ -166,35 +224,31 @@ void UCXDriver::conn_release_recvs(int fd)
 
 void UCXDriver::conn_shutdown(int fd)
 {
+
+    ldout(cct, 20) << __func__ << " fd: " << fd << " ep="
+                               << (void *)connections[fd].ucp_ep
+                               << " is shutting down " << dendl;
+
     if (is_connected(fd)) {
-        ucs_status_ptr_t request;
-        ucp_ep_h ucp_ep = connections[fd].ucp_ep;
-
-        assert(NULL != ucp_ep);
-        ldout(cct, 20) << __func__ << " fd: " << fd << " ep=" << (void *)ucp_ep
-                                   << " is shutting down " << dendl;
-
-        conn_release_recvs(fd);
-
-        request = ucp_ep_close_nb(ucp_ep, UCP_EP_CLOSE_MODE_FLUSH);
-        if (NULL == request) {
-            ldout(cct, 20) << __func__ << " ucp ep fd: " << fd << " closed in place..." << dendl;
-        } else if (UCS_PTR_IS_ERR(request)) {
-            lderr(cct) << __func__ << " ucp_ep_close_nb call failed " << dendl;
-        } else if (UCS_PTR_STATUS(request) != UCS_OK) {
-            /* Wait till the request finalizing */
-            do {
-                ucp_worker_progress(ucp_worker);
-            } while (UCS_INPROGRESS ==
-                        ucp_request_check_status(request));
-
-            ucp_request_free(request);
-        }
-
-        waiting_events.erase(fd);
-        connections[fd].ucp_ep = NULL;
-        return;
+        ucx_ep_close(fd, false);
     }
+
+    ucs_status_ptr_t request = connections[fd].close_request;
+    if (NULL != request) {
+        ldout(cct, 0) << __func__ << " fd: "
+                      << fd << " Wait a request finalizing " << dendl;
+
+        /* Wait a request finalizing */
+        do {
+            ucp_worker_progress(ucp_worker);
+        } while (UCS_INPROGRESS ==
+                    ucp_request_check_status(request));
+
+        ucp_request_free(request);
+        connections[fd].close_request = NULL;
+    }
+
+    waiting_events.erase(fd);
 
     Mutex::Locker l(lock);
     if (connecting.count(fd) > 0) {
@@ -207,6 +261,8 @@ void UCXDriver::conn_close(int fd)
 {
     if (connections.count(fd) > 0) {
         assert(waiting_events.count(fd) == 0);
+        /* Zero length messages cleaning */
+        conn_release_recvs(fd);
         connections.erase(fd);
     }
 }
@@ -249,6 +305,8 @@ void UCXDriver::addr_create(ucp_context_h ucp_context,
 void UCXDriver::cleanup(ucp_address_t *ucp_addr)
 {
     EpollDriver::del_event(ucp_fd, EVENT_READABLE, EVENT_READABLE);
+
+    ldout(cct, 20) << __func__ << dendl;
 
     ucp_worker_release_address(ucp_worker, ucp_addr);
     ucp_worker_destroy(ucp_worker);
@@ -454,9 +512,12 @@ void UCXDriver::event_progress(vector<FiredFileEvent> &fired_events)
 
         count = ucp_stream_worker_poll(ucp_worker, poll_eps, max_eps, 0);
         for (ssize_t i = 0; i < count; ++i) {
-            int fd = static_cast<int>(uintptr_t(poll_eps[i].user_data));
+            int fd = (static_cast<ucx_event_arg_t *>
+                                    (poll_eps[i].user_data))->fd;
 
             assert(fd > 0);
+            assert(connections[fd].ucp_ep == poll_eps[i].ep);
+
             recv_stream(fd);
         }
     } while (count > 0);
@@ -568,7 +629,7 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
         fe.mask = EVENT_READABLE;
 
         assert(fe.fd > 0);
-        assert(is_connected(fe.fd));
+
         assert(waiting_events.count(fe.fd) > 0);
         assert(!connections[fe.fd].rx_queue.empty());
 
