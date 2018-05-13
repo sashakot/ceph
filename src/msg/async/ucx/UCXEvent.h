@@ -34,6 +34,7 @@ struct ucx_connect_message {
 
 typedef struct {
     ucp_ep_h  ucp_ep;
+    ucs_status_ptr_t close_request;
     std::deque<bufferlist *> pending;
     std::deque<ucx_rx_buf *> rx_queue;
 } connection_t;
@@ -71,6 +72,7 @@ class UCXDriver : public EpollDriver {
         int recv_stream(int fd);
 
         void conn_release_recvs(int fd);
+        void ucx_ep_close(int fd, bool close_event);
 
     public:
         UCXDriver(CephContext *c): EpollDriver(c), cct(c),
@@ -101,7 +103,9 @@ class UCXDriver : public EpollDriver {
         }
 
         ssize_t send(int fd, bufferlist &bl, bool more);
+
         static void send_completion_cb(void *request, ucs_status_t status);
+        static void ucx_event_cb(void *arg, ucp_ep_h ep, ucs_status_t status);
 
         static void send_completion(ucx_req_descr *descr) {
             descr->bl->clear();
@@ -113,5 +117,9 @@ class UCXDriver : public EpollDriver {
         int read(int fd, char *rbuf, size_t bytes);
 };
 
+typedef struct {
+    int fd;
+    UCXDriver *driver;
+} ucx_event_arg_t;
 
 #endif //CEPH_UCXEVENT_H

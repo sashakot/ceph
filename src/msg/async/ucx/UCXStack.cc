@@ -31,8 +31,10 @@ void UCXConnectedSocketImpl::shutdown()
     ldout(cct(), 20) << __func__ << " conn fd: "
                      << tcp_fd << " is shutting down..." << dendl;
 
+    /* Call for shutdown even ucp_ep doesn't exist yet */
     if (tcp_fd > 0) {
         UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
+       //::shutdown(tcp_fd, SHUT_RDWR); //Vasily: ????
         driver->conn_shutdown(tcp_fd);
     }
 }
