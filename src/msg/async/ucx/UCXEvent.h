@@ -105,8 +105,6 @@ class UCXDriver : public EpollDriver {
         ssize_t send(int fd, bufferlist &bl, bool more);
 
         static void send_completion_cb(void *request, ucs_status_t status);
-        static void ucx_event_cb(void *arg, ucp_ep_h ep, ucs_status_t status);
-
         static void send_completion(ucx_req_descr *descr) {
             descr->bl->clear();
             if (descr->iov_list) {
@@ -116,10 +114,5 @@ class UCXDriver : public EpollDriver {
 
         int read(int fd, char *rbuf, size_t bytes);
 };
-
-typedef struct {
-    int fd;
-    UCXDriver *driver;
-} ucx_event_arg_t;
 
 #endif //CEPH_UCXEVENT_H
