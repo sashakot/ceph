@@ -119,20 +119,6 @@ void UCXDriver::ucx_ep_close(int fd, bool close_event)
     ldout(cct, 20) << __func__ << " fd: " << fd << " exit..." << dendl;
 }
 
-void UCXDriver::ucx_event_cb(void *arg, ucp_ep_h ep, ucs_status_t status)
-{
-    ucx_event_arg_t *ctx = reinterpret_cast<ucx_event_arg_t *>(arg);
-
-    int fd = ctx->fd;
-    UCXDriver *driver = ctx->driver;
-
-    assert(NULL == driver->connections[fd].ucp_ep ||
-                        ep == driver->connections[fd].ucp_ep);
-
-    driver->ucx_ep_close(fd, true);
-    delete ctx; //Vasily: if this callback is called always ??? leak if no
-}
-
 int UCXDriver::conn_create(int fd)
 {
     ucs_status_t status;
@@ -151,21 +137,13 @@ int UCXDriver::conn_create(int fd)
         return -EINVAL;
     }
 
-    ucx_event_arg_t *arg = new ucx_event_arg_t;
-
-    arg->fd = fd;
-    arg->driver = this;
-
-    params.user_data      = reinterpret_cast<void *>(arg);
+    params.user_data      = reinterpret_cast<void *>(fd);
     params.address        = reinterpret_cast<ucp_address_t *>(addr_buf);
 
-    params.err_handler.cb = ucx_event_cb;
     params.flags          = UCP_EP_PARAMS_FLAGS_NO_LOOPBACK;
-
 
     params.field_mask     = UCP_EP_PARAM_FIELD_FLAGS       |
                             UCP_EP_PARAM_FIELD_USER_DATA   |
-                            UCP_EP_PARAM_FIELD_ERR_HANDLER |
                             UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
 
     status = ucp_ep_create(ucp_worker, &params, &conn.ucp_ep);
@@ -173,6 +151,15 @@ int UCXDriver::conn_create(int fd)
         lderr(cct) << __func__ << " failed to create UCP endpoint " << dendl;
         return -EINVAL;
     }
+
+    delete [] addr_buf; //Vasily: allocate it in this func ????
+
+    connecting.erase(fd);
+
+    waiting_events.insert(fd);
+
+    assert(!conn.rx_queue.size());
+    assert(is_connected(fd));
 
     std::deque<bufferlist*> &pending = conn.pending;
 
@@ -186,14 +173,6 @@ int UCXDriver::conn_create(int fd)
     }
 
     assert(connections[fd].pending.empty());
-    delete [] addr_buf; //Vasily: allocate it in this func ????
-
-    connecting.erase(fd);
-
-    waiting_events.insert(fd);
-
-    assert(!conn.rx_queue.size());
-    assert(is_connected(fd));
 
     ldout(cct, 20) << __func__ << " fd: " << fd
                    << " ep=" << (void *)conn.ucp_ep
@@ -380,7 +359,7 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
     }
 
     if (UCS_PTR_IS_ERR(req)) {
-        lderr(cct) << __func__ << " fd: " << fd << " send failure" << dendl;
+        lderr(cct) << __func__ << " fd: " << fd << " send failure: " << UCS_PTR_STATUS(req) << dendl;
         return -1;
     }
 
@@ -512,13 +491,21 @@ void UCXDriver::event_progress(vector<FiredFileEvent> &fired_events)
 
         count = ucp_stream_worker_poll(ucp_worker, poll_eps, max_eps, 0);
         for (ssize_t i = 0; i < count; ++i) {
-            int fd = (static_cast<ucx_event_arg_t *>
-                                    (poll_eps[i].user_data))->fd;
+            int fd = static_cast<int>(uintptr_t(poll_eps[i].user_data));
 
             assert(fd > 0);
             assert(connections[fd].ucp_ep == poll_eps[i].ep);
 
-            recv_stream(fd);
+            assert((UCP_STREAM_POLL_FLAG_NVAL |
+                        UCP_STREAM_POLL_FLAG_IN) & poll_eps[i].flags);
+
+            if (UCP_STREAM_POLL_FLAG_IN & poll_eps[i].flags) {
+                recv_stream(fd);
+            }
+
+            if (UCP_STREAM_POLL_FLAG_NVAL & poll_eps[i].flags) {
+                ucx_ep_close(fd, true);
+            }
         }
     } while (count > 0);
 
