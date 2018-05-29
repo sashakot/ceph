@@ -36,8 +36,10 @@ class UCXStack;
 class UCXConnectedSocketImpl;
 
 class UCXWorker : public Worker {
+private:
     UCXStack *stack;
-    ucp_address_t *ucp_addr;
+    ucp_address_t *ucp_addr = NULL;
+
     size_t ucp_addr_len;
 
     UCXDriver *driver;
@@ -54,6 +56,7 @@ public:
     virtual void initialize() override;
     virtual void destroy() override;
 
+    void addr_create();
     int conn_establish(int fd);
 
     void set_stack(UCXStack *s);
@@ -94,6 +97,7 @@ private:
     int server_setup_socket = -1;
 
     CephContext *cct() { return worker->cct; }
+
 public:
     UCXServerSocketImpl(UCXWorker *w);
     ~UCXServerSocketImpl();
@@ -108,11 +112,16 @@ public:
 };
 
 class UCXStack : public NetworkStack {
+private:
     vector<std::thread> threads;
-    ucp_context_h ucp_context;
+    ucp_context_h ucp_context = NULL;
+
+    void ucx_contex_create();
+
 public:
     explicit UCXStack(CephContext *cct, const string &t);
     virtual ~UCXStack();
+
     virtual bool support_zero_copy_read() const override { return false; }
     virtual bool nonblock_connect_need_writable_event() const { return false; }
 
@@ -120,6 +129,9 @@ public:
     virtual void join_worker(unsigned i) override;
 
     ucp_context_h get_ucp_context() { return ucp_context; }
+
+    virtual bool is_ready() override { return NULL != ucp_context; };
+    virtual void ready() override { ucx_contex_create(); };
 };
 
 #endif

@@ -44,7 +44,7 @@ class UCXDriver : public EpollDriver {
         CephContext *cct;
 
         int ucp_fd = -1;
-        ucp_worker_h ucp_worker;
+        ucp_worker_h ucp_worker = NULL;
 
         Mutex lock; /* Protects 'connecting' pool */
 
