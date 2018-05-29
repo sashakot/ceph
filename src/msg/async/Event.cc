@@ -117,7 +117,7 @@ int EventCenter::init(int n, unsigned i, const std::string &t)
 #endif
   } else if (t == "ucx") {
 #ifdef HAVE_UCX
-    ldout(cct, 0) << __func__ << " UCX driver is going to be used" << dendl;
+    ldout(cct, 20) << __func__ << " UCX driver is going to be used" << dendl;
     driver = new UCXDriver(cct);
 #else
     lderr(cct) << __func__ << " failed to create UCX event driver" << dendl;

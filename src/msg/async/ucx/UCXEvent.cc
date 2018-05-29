@@ -214,8 +214,8 @@ void UCXDriver::conn_shutdown(int fd)
 
     ucs_status_ptr_t request = connections[fd].close_request;
     if (NULL != request) {
-        ldout(cct, 0) << __func__ << " fd: "
-                      << fd << " Wait a request finalizing " << dendl;
+        ldout(cct, 20) << __func__ << " fd: "
+                       << fd << " Wait a request finalizing " << dendl;
 
         /* Wait a request finalizing */
         do {
@@ -260,6 +260,8 @@ void UCXDriver::addr_create(ucp_context_h ucp_context,
     params.thread_mode = UCS_THREAD_MODE_SINGLE;
     params.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
 
+    assert(NULL != ucp_context);
+
     status = ucp_worker_create(ucp_context, &params, &ucp_worker);
     if (UCS_OK != status) {
         lderr(cct) << __func__ << " failed to create UCP worker " << dendl;
@@ -283,12 +285,20 @@ void UCXDriver::addr_create(ucp_context_h ucp_context,
 
 void UCXDriver::cleanup(ucp_address_t *ucp_addr)
 {
-    EpollDriver::del_event(ucp_fd, EVENT_READABLE, EVENT_READABLE);
+    if (ucp_fd > 0) {
+        ldout(cct, 20) << __func__ << dendl;
 
-    ldout(cct, 20) << __func__ << dendl;
+        assert(NULL != ucp_addr);
+        assert(NULL != ucp_worker);
 
-    ucp_worker_release_address(ucp_worker, ucp_addr);
-    ucp_worker_destroy(ucp_worker);
+        EpollDriver::del_event(ucp_fd, EVENT_READABLE, EVENT_READABLE);
+
+        ucp_worker_release_address(ucp_worker, ucp_addr);
+        ucp_worker_destroy(ucp_worker);
+
+        ucp_fd     = -1;
+        ucp_worker = NULL;
+    }
 }
 
 UCXDriver::~UCXDriver()
@@ -555,6 +565,10 @@ int UCXDriver::resize_events(int newsize)
 
 int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *tvp)
 {
+    if (NULL == ucp_worker) {
+        return EpollDriver::event_wait(fired_events, tvp);
+    }
+
     bool ucp_event = false;
     vector<FiredFileEvent> events;
 

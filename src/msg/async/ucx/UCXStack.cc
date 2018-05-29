@@ -298,14 +298,14 @@ int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, Con
 
 void UCXWorker::initialize()
 {
-    driver = dynamic_cast<UCXDriver *>(center.get_driver());
-    driver->addr_create(get_stack()->get_ucp_context(),
-                        &ucp_addr, &ucp_addr_len);
 }
 
 void UCXWorker::destroy()
 {
-    driver->cleanup(ucp_addr);
+    if (NULL != ucp_addr) {
+        driver->cleanup(ucp_addr);
+        ucp_addr = NULL;
+    }
 }
 
 void UCXWorker::set_stack(UCXStack *s)
@@ -313,15 +313,18 @@ void UCXWorker::set_stack(UCXStack *s)
     stack = s;
 }
 
-UCXStack::UCXStack(CephContext *cct, const string &t) : NetworkStack(cct, t)
+void UCXStack::ucx_contex_create()
 {
-
-    ucs_status_t status;
-    ucp_config_t *ucp_config;
     ucp_params_t params;
+    ucs_status_t status;
 
-    ldout(cct, 10) << __func__ << " constructing UCX stack " << t
-                   << " with " << get_num_worker() << " workers " << dendl;
+    ucp_config_t *ucp_config;
+
+    if (NULL != ucp_context) {
+        return;
+    }
+
+    ldout(cct, 10) << __func__ << " UCX contex is going to be created..." << dendl;
 
     int rc = setenv("UCX_CEPH_NET_DEVICES", cct->_conf->ms_async_ucx_device.c_str(), 1);
     if (rc) {
@@ -360,11 +363,31 @@ UCXStack::UCXStack(CephContext *cct, const string &t) : NetworkStack(cct, t)
 
     status = ucp_init(&params, ucp_config, &ucp_context);
     ucp_config_release(ucp_config);
+
     if (UCS_OK != status) {
         lderr(cct) << __func__ << "failed to init UCP context" << dendl;
         ceph_abort();
     }
+
+    for (unsigned i = 0; i < get_num_worker(); i++) {
+        UCXWorker *w = dynamic_cast<UCXWorker *>(get_worker(i));
+        w->addr_create();
+    }
+
     ucp_context_print_info(ucp_context, stdout);
+}
+
+void UCXWorker::addr_create()
+{
+    driver = dynamic_cast<UCXDriver *>(center.get_driver());
+    driver->addr_create(get_stack()->get_ucp_context(),
+                        &ucp_addr, &ucp_addr_len);
+}
+
+UCXStack::UCXStack(CephContext *cct, const string &t) : NetworkStack(cct, t)
+{
+    ldout(cct, 10) << __func__ << " constructing UCX stack " << t
+               << " with " << get_num_worker() << " workers " << dendl;
 
     for (unsigned i = 0; i < get_num_worker(); i++) {
         UCXWorker *w = dynamic_cast<UCXWorker *>(get_worker(i));
@@ -374,7 +397,9 @@ UCXStack::UCXStack(CephContext *cct, const string &t) : NetworkStack(cct, t)
 
 UCXStack::~UCXStack()
 {
-    ucp_cleanup(ucp_context);
+    if (NULL != ucp_context) {
+        ucp_cleanup(ucp_context);
+    }
 }
 
 void UCXStack::spawn_worker(unsigned i, std::function<void ()> &&func)
