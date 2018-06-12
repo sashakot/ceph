@@ -8,82 +8,10 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "UCXDriver "
 
-int UCXDriver::send_addr(int fd,
-                         ucp_address_t *ucp_addr,
-                         size_t ucp_addr_len)
-{
-    int rc;
-    ucx_connect_message msg;
-
-    /* Send connected message */
-    msg.addr_len = ucp_addr_len; //Vasily: if I need to exchange it ?????
-    msg.remote_fd = fd;
-
-    //Vasily: write in network order
-    rc = ::write(fd, &msg, sizeof(msg));
-    if (rc != sizeof(msg)) {
-        lderr(cct) << __func__ << " failed to send connect msg header" << dendl;
-        return -errno;
-    }
-
-    rc = ::write(fd, ucp_addr, ucp_addr_len);
-    if (rc != (int) ucp_addr_len) {
-        lderr(cct) << __func__ << " failed to send worker address " << dendl;
-        return -errno;
-    }
-
-    ldout(cct, 10) << __func__ << " fd: " << fd
-                   << " addr sent successfully  " << dendl;
-
-    return 0;
-}
-
-int UCXDriver::conn_establish(int fd,
-                              ucp_address_t *ucp_addr,
-                              size_t ucp_addr_len)
-{
-    ldout(cct, 10) << __func__ << " fd: " << fd << " start connecting " << dendl;
-
-    int rc = send_addr(fd, ucp_addr, ucp_addr_len);
-    if (rc < 0) {
-        return rc;
-    }
-
-    Mutex::Locker l(lock);
-    assert(0 == connecting.count(fd) &&
-                    0 == connections.count(fd));
-
-    connecting.insert(fd);
-    return 0;
-}
-
-char *UCXDriver::recv_addr(int fd)
-{
-    int rc;
-    char *addr_buf;
-
-    ucx_connect_message msg;
-
-    // get our peer address
-    rc = ::read(fd, &msg, sizeof(msg));
-    if (rc != sizeof(msg)) {
-        lderr(cct) << __func__ << " failed to recv connect msg header" << dendl;
-        return NULL;
-    }
-
-    ldout(cct, 20) << __func__ << " conn between fd: " << fd << " remote_fd: "
-                   << msg.remote_fd << " addr len: " << msg.addr_len << dendl;
-
-    addr_buf = new char [msg.addr_len];
-
-    rc = ::read(fd, addr_buf, msg.addr_len);
-    if (rc != (int) msg.addr_len) {
-        lderr(cct) << __func__ << " failed to recv worker address " << dendl;
-        return NULL;
-    }
-
-    return addr_buf;
-}
+typedef struct {
+    int fd;
+    UCXDriver *driver;
+} ucp_accept_arg_t;
 
 void UCXDriver::ucx_ep_close(int fd, bool close_event)
 {
@@ -106,10 +34,15 @@ void UCXDriver::ucx_ep_close(int fd, bool close_event)
                        << " ucp_ep_close_nb call failed: err "
                        << ucs_status_string(UCS_PTR_STATUS(request)) << dendl;
             ceph_abort(); //Vasily: ????
+        } else {
+            /*
+             * We don't care even the request is still in
+             * UCS_INPROGRESS state - it's UCX responsility now
+             */
+            ucp_request_free(request);
         }
 
         connections[fd].ucp_ep = NULL;
-        connections[fd].close_request = request;
 
         if (close_event) {
             insert_rx(fd, NULL, 0);
@@ -119,66 +52,22 @@ void UCXDriver::ucx_ep_close(int fd, bool close_event)
     ldout(cct, 20) << __func__ << " fd: " << fd << " exit..." << dendl;
 }
 
-int UCXDriver::conn_create(int fd)
+void UCXDriver::conn_create(int fd, ucp_ep_h ucp_ep)
 {
-    ucs_status_t status;
-    ucp_ep_params_t params;
-
     connection_t &conn = connections[fd];
 
     assert(!is_connected(fd));
-    assert(!conn.close_request);
-
     ldout(cct, 20) << __func__ << " conn for fd: " << fd
                                << " is creating " << dendl;
 
-    char *addr_buf = recv_addr(fd);
-    if (!addr_buf) {
-        return -EINVAL;
-    }
-
-    params.user_data      = reinterpret_cast<void *>(fd);
-    params.address        = reinterpret_cast<ucp_address_t *>(addr_buf);
-
-    params.flags          = UCP_EP_PARAMS_FLAGS_NO_LOOPBACK;
-
-    params.field_mask     = UCP_EP_PARAM_FIELD_FLAGS       |
-                            UCP_EP_PARAM_FIELD_USER_DATA   |
-                            UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
-
-    status = ucp_ep_create(ucp_worker, &params, &conn.ucp_ep);
-    if (UCS_OK != status) {
-        lderr(cct) << __func__ << " failed to create UCP endpoint " << dendl;
-        return -EINVAL;
-    }
-
-    delete [] addr_buf; //Vasily: allocate it in this func ????
-
-    connecting.erase(fd);
-
-    waiting_events.insert(fd);
+    conn.ucp_ep = ucp_ep;
 
     assert(!conn.rx_queue.size());
     assert(is_connected(fd));
 
-    std::deque<bufferlist*> &pending = conn.pending;
-
-    while (!pending.empty()) {
-        bufferlist *bl = pending.front();
-
-        pending.pop_front();
-        if (send(fd, *bl, 0) < 0) {
-            return -EINVAL;
-        }
-    }
-
-    assert(connections[fd].pending.empty());
-
     ldout(cct, 20) << __func__ << " fd: " << fd
                    << " ep=" << (void *)conn.ucp_ep
                    << " connection was successfully created " << dendl;
-
-    return 0;
 }
 
 void UCXDriver::conn_release_recvs(int fd)
@@ -201,54 +90,261 @@ void UCXDriver::conn_release_recvs(int fd)
     undelivered.erase(fd);
 }
 
+int UCXDriver::connect(const entity_addr_t &peer_addr,
+                       const SocketOptions &opts, int &fd)
+{
+    ucp_ep_params_t ep_params;
+
+    fd = fd_pool.open_fd();
+    ep_params.field_mask = UCP_EP_PARAM_FIELD_FLAGS     |
+                           UCP_EP_PARAM_FIELD_SOCK_ADDR |
+                           UCP_EP_PARAM_FIELD_USER_DATA;
+
+    ep_params.user_data = reinterpret_cast<void *>(fd);
+    ep_params.flags     = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
+#if 1
+    struct sockaddr_in addr;
+
+    memset(&addr, 0, sizeof(addr));
+
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr =  inet_addr("12.210.8.58");
+    addr.sin_port        = peer_addr.get_port();
+
+    ep_params.sockaddr.addr    = (struct sockaddr *) &addr;
+    ep_params.sockaddr.addrlen = sizeof(struct sockaddr);
+#endif
+#if 0
+    ep_params.sockaddr.addr    = peer_addr.get_sockaddr();
+    ep_params.sockaddr.addrlen = sizeof(struct sockaddr);
+#endif
+
+    ucp_ep_h ucp_ep;
+    ucs_status_t status = ucp_ep_create(ucp_worker, &ep_params, &ucp_ep);
+    if (UCS_OK != status) {
+        lderr(cct) << __func__ << " creating UCP ep to addr failed wth status: "
+                               << ucs_status_string(status) << dendl;
+        return -EINVAL; //Vasily: ?????
+    }
+
+    ldout(cct, 0) << __func__ << " fd: " << fd
+                  << " UCP ep: " << (void *)ucp_ep << " to addr: "
+                  << peer_addr.get_sockaddr()
+                  << " successfully created" << dendl;
+
+    conn_create(fd, ucp_ep);
+    //Vasily: event_progress(); ????
+
+    return 0;
+}
+
+void UCXDriver::queue_accept(int server_fd, ucp_ep_address_t *ep_addr)
+{
+    conn_requests.insert(server_fd);
+    accept_queues[server_fd].push_back(ep_addr);
+
+    ldout(cct, 0) << __func__ << " server_fd: " << server_fd
+                  << " UCP ep_addr: " << (void *)ep_addr << dendl;
+}
+
+void UCXDriver::accept_cb(ucp_ep_address_t *ep_addr, void *arg) { /* ep_addr is worker_addr + ep_addr of client */
+    ucp_accept_arg_t *ctx = reinterpret_cast<ucp_accept_arg_t *>(arg);
+
+    int server_fd = ctx->fd;
+    UCXDriver *driver = ctx->driver;
+
+    driver->queue_accept(server_fd, ep_addr);
+    delete ctx;
+
+    //Vasily: if I am here => it happens during progress !!!!, if I get CQ event before that 'progress' call
+    //=> check two cases of ucp_worker_progress call: => I should check server/fd events right after wait_event enterance: maybe make sense to do progress before quit and check recvs&server only on entarce
+    //Vasily: insert to the 'accepted' (using lock) <server_setup_socket, ep_addr>
+
+    /*
+        event_wait {
+            1) check recvs/accepts => return if get smthg
+            2) wait on CQ events
+            3) progress
+        }
+
+        ** when I call for ucp_worker_progress in case of ep close => call it while (ucp_worker_progress(ucp_worker)); after the request is called
+    */
+}
+
+void UCXDriver::abort_accept(int server_fd)
+{
+    if (fd_pool.is_open(server_fd)) {
+        conn_requests.erase(server_fd);
+        accept_queues[server_fd].clear();
+
+        fd_pool.close_fd(server_fd);
+    }
+}
+
+void UCXDriver::stop_listen(int server_fd)
+{
+    if (listeners[server_fd]) {
+        abort_accept(server_fd);
+        ucp_listener_destroy(listeners[server_fd]);
+        listeners[server_fd] = NULL;
+        listeners.erase(server_fd);
+    }
+}
+
+int UCXDriver::listen(entity_addr_t &sa,
+                      const SocketOptions &opts, //Vasily: ?????
+                      int &server_fd)
+{
+    ucp_listener_params_t params;
+
+    server_fd = fd_pool.open_fd();
+
+    params.field_mask = UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
+                        UCP_LISTENER_PARAM_FIELD_ACCEPT_HANDLER2;
+#if 1
+    struct sockaddr_in addr;
+
+    memset(&addr, 0, sizeof(addr));
+
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("12.210.8.58");
+
+    addr.sin_port = sa.get_port();
+
+    params.sockaddr.addr    = reinterpret_cast<const struct sockaddr*>(&addr);
+    params.sockaddr.addrlen = sizeof(struct sockaddr);
+#endif
+#if 0
+    params.sockaddr.addr    = sa.get_sockaddr();
+    params.sockaddr.addrlen = sizeof(struct sockaddr);
+#endif
+    ucp_accept_arg_t *arg = new ucp_accept_arg_t();
+
+    arg->fd = server_fd;
+    arg->driver = this;
+
+    params.accept_handler2.cb  = accept_cb;
+    params.accept_handler2.arg = reinterpret_cast<void *>(arg);
+
+    ucp_listener_h ucp_listener;
+
+    /* Create a listener on the server side to listen on the given address.*/
+    ucs_status_t status = ucp_listener_create(ucp_worker, &params,
+                                              &ucp_listener);
+    if (UCS_OK != status) {
+        lderr(cct) << __func__ << " Failed to create UCP listener with status: "
+                   << ucs_status_string(status) << dendl;
+        return -EINVAL;
+    }
+
+    ldout(cct, 0) << __func__ << " Created listner to addr: "
+                   << sa.get_sockaddr() << " server_fd: " << server_fd << dendl;
+
+    listeners[server_fd] = ucp_listener;
+
+    return 0;
+}
+
+int UCXDriver::server_conn_create(int fd, ucp_ep_address_t *ep_addr)
+{
+    ucp_ep_h ucp_ep;
+    ucp_ep_params_t ep_params;
+
+    assert(fd > 0);
+
+    ldout(cct, 0) << __func__ << " fd: " << fd
+                  << " ep addr: " << ep_addr << dendl;
+
+    ep_params.ep_addr   = ep_addr;
+    ep_params.user_data = reinterpret_cast<void *>(fd);
+
+    ep_params.field_mask = UCP_EP_PARAM_FIELD_EP_ADDR |
+                           UCP_EP_PARAM_FIELD_USER_DATA;
+
+    ucs_status_t status = ucp_ep_create(ucp_worker,
+                                        &ep_params, &ucp_ep);
+    if (UCS_OK != status) {
+        lderr(cct) << __func__ << " failed to create UCP endpoint " << dendl;
+        return -EINVAL;
+    }
+
+    conn_create(fd, ucp_ep); //Vasily: ????
+    return 0;
+}
+
+int UCXDriver::signal(int fd, ucp_ep_address_t *ep_addr)
+{
+    accept_t *c = new accept_t();
+
+    c->fd = fd;
+    c->ep_addr = ep_addr;
+
+    Mutex::Locker l(lock);
+    accepted.push_back(c);
+
+    ucs_status_t status = ucp_worker_signal(ucp_worker);
+    if (UCS_OK != status) {
+        lderr(cct) << __func__ << " failed to signal to ucp_worker: "
+                               << (void *)ucp_worker << dendl;
+        return -EINVAL; //Vasily: ????
+    }
+
+    return 0;
+}
+
+int UCXDriver::accept(int server_fd, int &fd,
+                      ucp_ep_address_t *&ep_addr)
+{
+    if (accept_queues[server_fd].empty()) {
+        return -EAGAIN;
+    }
+
+    ep_addr = accept_queues[server_fd].front();
+    accept_queues[server_fd].pop_front();
+
+    if (accept_queues[server_fd].empty()) {
+        conn_requests.erase(server_fd);
+    }
+
+    fd = fd_pool.open_fd();
+    ldout(cct, 0) << __func__ << " server_fd: "
+                  << server_fd << " conn fd: " << fd << dendl;
+
+    return 0;
+}
+
 void UCXDriver::conn_shutdown(int fd)
 {
-
-    ldout(cct, 20) << __func__ << " fd: " << fd << " ep="
-                               << (void *)connections[fd].ucp_ep
-                               << " is shutting down " << dendl;
+    ldout(cct, 20) << __func__ << " conn fd: " << fd << dendl;
 
     if (is_connected(fd)) {
         ucx_ep_close(fd, false);
     }
 
-    ucs_status_ptr_t request = connections[fd].close_request;
-    if (NULL != request) {
-        ldout(cct, 20) << __func__ << " fd: "
-                       << fd << " Wait a request finalizing " << dendl;
-
-        /* Wait a request finalizing */
-        do {
-            ucp_worker_progress(ucp_worker);
-        } while (UCS_INPROGRESS ==
-                    ucp_request_check_status(request));
-
-        ucp_request_free(request);
-        connections[fd].close_request = NULL;
-    }
-
-    waiting_events.erase(fd);
-
+    read_events.erase(fd);
+    write_events.erase(fd);
+#if 0
     Mutex::Locker l(lock);
-    if (connecting.count(fd) > 0) {
-        connecting.erase(fd);
+    if (accepted.count(fd) > 0) {
+        accepted.erase(fd);
         assert(waiting_events.count(fd) == 0);
     }
+#endif //Vasily: ???
 }
 
 void UCXDriver::conn_close(int fd)
 {
     if (connections.count(fd) > 0) {
-        assert(waiting_events.count(fd) == 0);
+        assert(!read_events.count(fd) &&
+                    !write_events.count(fd));
         /* Zero length messages cleaning */
         conn_release_recvs(fd);
         connections.erase(fd);
+        fd_pool.close_fd(fd);
     }
 }
 
-void UCXDriver::addr_create(ucp_context_h ucp_context,
-                            ucp_address_t **ucp_addr,
-                            size_t *ucp_addr_len)
+void UCXDriver::worker_init(ucp_context_h ucp_context)
 {
     ucs_status_t status;
     ucp_worker_params_t params;
@@ -268,32 +364,24 @@ void UCXDriver::addr_create(ucp_context_h ucp_context,
         ceph_abort();
     }
 
-    status = ucp_worker_get_address(ucp_worker, ucp_addr, ucp_addr_len);
-    if (UCS_OK != status) {
-        lderr(cct) << __func__ << " failed to obtain UCP worker address " << dendl;
-        ceph_abort();
-    }
-
     status = ucp_worker_get_efd(ucp_worker, &ucp_fd);
     if (UCS_OK != status) {
         lderr(cct) << __func__ << " failed to obtain UCP worker event fd " << dendl;
         ceph_abort();
     }
 
+    fd_pool.init(ucp_fd);
     EpollDriver::add_event(ucp_fd, 0, EVENT_READABLE);
 }
 
-void UCXDriver::cleanup(ucp_address_t *ucp_addr)
+void UCXDriver::cleanup()
 {
     if (ucp_fd > 0) {
         ldout(cct, 20) << __func__ << dendl;
 
-        assert(NULL != ucp_addr);
         assert(NULL != ucp_worker);
 
         EpollDriver::del_event(ucp_fd, EVENT_READABLE, EVENT_READABLE);
-
-        ucp_worker_release_address(ucp_worker, ucp_addr);
         ucp_worker_destroy(ucp_worker);
 
         ucp_fd     = -1;
@@ -313,15 +401,13 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
     unsigned total_len = bl.length();
     unsigned iov_cnt = bl.get_num_buffers();
 
-    assert(fd > 0);
-
     if (total_len == 0) {
         return 0;
     }
 
     if (NULL == connections[fd].ucp_ep) {
-        connections[fd].pending.push_back(&bl);
-        ldout(cct, 20) << __func__ << " put send to the pending, fd: " << fd << dendl;
+        ldout(cct, 20) << __func__ << " fd: " << fd << " put "
+                       << total_len << " bytes to the pending" << dendl;
 
         return total_len;
     }
@@ -370,13 +456,13 @@ ssize_t UCXDriver::send(int fd, bufferlist &bl, bool more)
 
     if (UCS_PTR_IS_ERR(req)) {
         lderr(cct) << __func__ << " fd: " << fd << " send failure: " << UCS_PTR_STATUS(req) << dendl;
-        return -1;
+        return -EINVAL;
     }
 
     req->bl->claim_append(bl);
     req->iov_list = iov_list;
 
-    ldout(cct, 10) << __func__ << " send in progress req " << req << dendl;
+    ldout(cct, 0) << __func__ << " send in progress req " << req << dendl;
 
     return total_len;
 }
@@ -387,6 +473,8 @@ void UCXDriver::send_completion_cb(void *req, ucs_status_t status)
 
     UCXDriver::send_completion(desc);
     ucp_request_free(req);
+
+    std::cout << __func__ << " completed send req: " << (void *) req << std::endl; fflush(stderr); fflush(stdout);
 }
 
 void UCXDriver::insert_rx(int fd, uint8_t *rdata, size_t length)
@@ -397,7 +485,7 @@ void UCXDriver::insert_rx(int fd, uint8_t *rdata, size_t length)
     rx_buf->rdata  = rdata;
     rx_buf->length = length;
 
-    if (in_set(waiting_events, fd)) {
+    if (in_set(read_events, fd)) {
         undelivered.insert(fd);
     }
 
@@ -433,9 +521,9 @@ int UCXDriver::recv_stream(int fd)
     return 0;
 }
 
-int UCXDriver::read(int fd, char *rbuf, size_t bytes)
+ssize_t UCXDriver::read(int fd, char *rbuf, size_t bytes)
 {
-    assert(fd > 0 && connections.count(fd) > 0);
+    assert(connections.count(fd) > 0);
 
     std::deque<ucx_rx_buf *> &rx_queue = connections[fd].rx_queue;
     if (rx_queue.empty()) {
@@ -453,8 +541,8 @@ int UCXDriver::read(int fd, char *rbuf, size_t bytes)
     left = rx_buf->length - rx_buf->offset;
     ldout(cct, 20) << __func__ << " fd: " << fd << " read to "
                                << (void *)rbuf << " wanted "
-                               << bytes << " left " << left << " rx_buf = "
-                               << (void *)rx_buf << " rx_buf->length = "
+                               << bytes << " left " << left << " rx_buf= "
+                               << (void *)rx_buf << " rx_buf->length= "
                                << rx_buf->length << dendl;
 
     if (bytes < left) {
@@ -478,11 +566,11 @@ erase_buf:
     return left;
 }
 
-void UCXDriver::event_progress(vector<FiredFileEvent> &fired_events)
+void UCXDriver::event_progress()
 {
     if (connections.empty()) {
         ldout(cct, 20) << __func__ << " The connections list is empty " << dendl;
-        return;
+        //return;
     }
 
     ssize_t count;
@@ -505,7 +593,6 @@ void UCXDriver::event_progress(vector<FiredFileEvent> &fired_events)
 
             assert(fd > 0);
             assert(connections[fd].ucp_ep == poll_eps[i].ep);
-
             assert((UCP_STREAM_POLL_FLAG_NVAL |
                         UCP_STREAM_POLL_FLAG_IN) & poll_eps[i].flags);
 
@@ -518,49 +605,129 @@ void UCXDriver::event_progress(vector<FiredFileEvent> &fired_events)
             }
         }
     } while (count > 0);
-
-    ldout(cct, 20) << __func__ << " Exit from events handler: num of events: "
-                               << fired_events.size() << dendl;
 }
 
 int UCXDriver::init(EventCenter *c, int nevent)
 {
-	return EpollDriver::init(c, nevent);
+    ldout(cct, 20) << __func__ << " num of events: " << nevent << dendl;
+    return EpollDriver::init(c, nevent);
 }
 
 int UCXDriver::add_event(int fd, int cur_mask, int add_mask)
 {
-    ldout(cct, 20) << __func__ << " fd: " << fd << " read ? " << (EVENT_READABLE & add_mask) << dendl;
+    ldout(cct, 0) << __func__ << " fd: " << fd << " read ? " << (EVENT_READABLE & add_mask) << dendl;
 
-    if (EVENT_READABLE & add_mask &&
-                        is_connected(fd)) {
-        assert(!in_set(waiting_events, fd));
-        waiting_events.insert(fd);
+    if (fd_pool.is_system_fd(fd)) {
+        return EpollDriver::add_event(fd, cur_mask, add_mask);
+    }
 
-        if (connections[fd].rx_queue.size() > 0) {
+    if (EVENT_READABLE & add_mask) {
+        assert(!in_set(read_events, fd));
+        read_events.insert(fd);
+
+        if (is_connected(fd) &&
+                    connections[fd].rx_queue.size() > 0) {
             undelivered.insert(fd);
         }
     }
 
-	return EpollDriver::add_event(fd, cur_mask, add_mask);
+    if (EVENT_WRITABLE & add_mask) {
+        assert(!in_set(write_events, fd));
+        write_events.insert(fd);
+    }
+
+    return 0;
 }
 
 int UCXDriver::del_event(int fd, int cur_mask, int delmask)
 {
     ldout(cct, 20) << __func__ << " fd: " << fd << " read ? " << (EVENT_READABLE & delmask) << dendl;
 
-    if (EVENT_READABLE & delmask &&
-                        waiting_events.count(fd) > 0) {
-        waiting_events.erase(fd);
+    if (fd_pool.is_system_fd(fd)) {
+        return EpollDriver::del_event(fd, cur_mask, delmask);
+    }
+
+    if (EVENT_READABLE & delmask) {
+        read_events.erase(fd);
         undelivered.erase(fd);
     }
 
-	return EpollDriver::del_event(fd, cur_mask, delmask);
+    if (EVENT_WRITABLE & delmask) {
+        write_events.erase(fd);
+    }
+
+    return 0;
 }
 
 int UCXDriver::resize_events(int newsize)
 {
-	return EpollDriver::resize_events(newsize);
+    return EpollDriver::resize_events(newsize);
+}
+
+int UCXDriver::process_connections(vector<FiredFileEvent> &fired_events)
+{
+    struct FiredFileEvent fe;
+
+    /* Check for server socket events */
+    for (std::set<int>::iterator it = conn_requests.begin();
+                                it != conn_requests.end(); ++it) {
+        int server_fd = *it;
+
+        if (!accept_queues[server_fd].empty()
+                    && read_events.count(server_fd) > 0) {
+            struct FiredFileEvent fe;
+
+            fe.fd = server_fd;
+            fe.mask = EVENT_READABLE;
+
+            fired_events.push_back(fe);
+
+            ldout(cct, 20) << __func__ << " conn request for server fd: " << server_fd << dendl;
+            return fe.fd;
+        }
+    }
+
+    Mutex::Locker l(lock);
+    if (!accepted.empty()) {
+        accept_t *c = accepted.front();
+
+        accepted.pop_front();
+        if (server_conn_create(c->fd, c->ep_addr) < 0) {
+            ceph_abort();
+        }
+
+        delete c;
+
+        if (read_events.count(c->fd) > 0) {
+            fe.fd = c->fd;
+            fe.mask = EVENT_READABLE;
+            fired_events.push_back(fe);
+
+            ldout(cct, 20) << __func__ << " accepted fd: " << c->fd << dendl;
+
+            return fe.fd;
+        }
+    }
+
+    ldout(cct, 20) << __func__ << " nothing to proccess..." << dendl;
+
+    return 0;
+}
+
+int UCXDriver::process_writes(vector<FiredFileEvent> &fired_events)
+{
+    for (std::set<int>::iterator it = write_events.begin();
+                                it != write_events.end(); ++it) {
+        struct FiredFileEvent fe;
+
+        fe.fd = *it;
+        fe.mask = EVENT_WRITABLE;
+        fired_events.push_back(fe);
+
+        ldout(cct, 20) << __func__ << " write event on fd: " << fe.fd << dendl;
+    }
+
+    return fired_events.size();
 }
 
 int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *tvp)
@@ -569,58 +736,40 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
         return EpollDriver::event_wait(fired_events, tvp);
     }
 
-    bool ucp_event = false;
-    vector<FiredFileEvent> events;
-
     assert(0 == fired_events.size());
     assert(!connections.empty() || undelivered.empty());
 
-    if (undelivered.empty() &&
-                UCS_OK == ucp_worker_arm(ucp_worker)) {
-        int num_events = EpollDriver::event_wait(events, tvp);
-        if (num_events < 0) {
-            return num_events;
-        }
+    if (process_connections(fired_events)) {
+        return fired_events.size();
+    }
 
-        for (unsigned i = 0; i < events.size(); ++i) {
-            struct FiredFileEvent fe = events[i];
+    if (!process_writes(fired_events) && undelivered.empty()) {
+        vector<FiredFileEvent> events;
 
-            if (ucp_fd != fe.fd) {
-                if ((EVENT_READABLE & fe.mask) &&
-                            in_set(waiting_events, fe.fd)) {
-                    ldout(cct, 0) << __func__ << " fd: " << fe.fd << " read zero event " << dendl;
-                    /* Insert zero message */
-                    insert_rx(fe.fd, NULL, 0);
-                } else if (EVENT_READABLE & fe.mask) {
-                    Mutex::Locker l(lock);
-                    if (connecting.count(fe.fd) > 0) {
-                        if (conn_create(fe.fd) < 0) {
-                            ldout(cct, 0) << __func__ << " fd: " << fe.fd << " conn create fail " << dendl;
-                            /* Insert zero message */
-                            insert_rx(fe.fd, NULL, 0);
-                        } else {
-                            ucp_event = true;
-                        }
-                    }
-                }
+        if (UCS_OK == ucp_worker_arm(ucp_worker)) {
+            int num_events = EpollDriver::event_wait(events, tvp);
+            if (num_events < 0) {
+                lderr(cct) << __func__ << " epoll wait failed with err: "
+                           << num_events << dendl;
 
-                if (!connections.count(fe.fd) ||
-                            in_set(waiting_events, fe.fd)) {
-                    ldout(cct, 20) << __func__ << " fd: " << fe.fd << " fired event " << dendl;
+                return num_events;
+            }
+
+            ldout(cct, 20) << __func__ << " waking up with " << events.size() << " events " << dendl;
+
+            for (unsigned i = 0; i < events.size(); ++i) {
+                struct FiredFileEvent fe = events[i];
+
+                if (ucp_fd != fe.fd) {
                     fired_events.push_back(fe);
-                 }
-            } else {
-                ucp_event = true;
+                    ldout(cct, 20) << __func__ << " fd: " << fe.fd << " fired event " << dendl;
+                }
             }
         }
-    } else {
-        ucp_event = true;
-        ldout(cct, 20) << __func__ << " UCP arm is not OK" << dendl;
     }
 
-    if (ucp_event) {
-        event_progress(fired_events);
-    }
+    event_progress();
+    ldout(cct, 20) << __func__ << " undelivered size: " << undelivered.size() << dendl;
 
     for (std::set<int>::iterator it = undelivered.begin();
                                 it != undelivered.end(); ++it) {
@@ -631,7 +780,7 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
 
         assert(fe.fd > 0);
 
-        assert(waiting_events.count(fe.fd) > 0);
+        assert(read_events.count(fe.fd) > 0);
         assert(!connections[fe.fd].rx_queue.empty());
 
         fired_events.push_back(fe);
@@ -640,4 +789,3 @@ int UCXDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *
 
     return fired_events.size();
 }
-

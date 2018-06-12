@@ -3,6 +3,15 @@
 
 #include <vector>
 
+//Vasily: ???
+//#include <cinttypes>
+//#include <cstdint>
+//#include <limits.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 #include "msg/async/Stack.h"
 #include "msg/async/Event.h"
 #include "msg/async/EventEpoll.h"
@@ -34,10 +43,13 @@ struct ucx_connect_message {
 
 typedef struct {
     ucp_ep_h  ucp_ep;
-    ucs_status_ptr_t close_request;
-    std::deque<bufferlist *> pending;
     std::deque<ucx_rx_buf *> rx_queue;
 } connection_t;
+
+typedef struct {
+    int fd;
+    ucp_ep_address_t *ep_addr;
+} accept_t;
 
 class UCXDriver : public EpollDriver {
     private:
@@ -46,33 +58,75 @@ class UCXDriver : public EpollDriver {
         int ucp_fd = -1;
         ucp_worker_h ucp_worker = NULL;
 
-        Mutex lock; /* Protects 'connecting' pool */
+        Mutex lock; /* Protects 'accepted' pool */
+        std::deque<accept_t *> accepted;
 
-        std::set<int> connecting;
-        std::set<int> waiting_events;
+        std::set<int> read_events;
+        std::set<int> write_events;
 
         std::set<int> undelivered;
         std::map<int, connection_t> connections;
 
-        void event_progress(vector<FiredFileEvent> &fired_events);
-        void dispatch_events(vector<FiredFileEvent> &fired_events);
+        std::set<int> conn_requests;
+
+        std::map<int, ucp_listener_h> listeners;
+        std::map<int, std::deque<ucp_ep_address_t *>> accept_queues;
+
+        void event_progress();
 
         void insert_rx(int fd, uint8_t *rdata, size_t length);
+        void queue_accept(int server_fd, ucp_ep_address_t *ep_addr);
 
         bool in_set(std::set<int> set, int fd) {
             return set.find(fd) != set.end();
         }
 
-        char *recv_addr(int fd);
-        int send_addr(int fd,
-                      ucp_address_t *ucp_addr,
-                      size_t ucp_addr_len);
-
-        int conn_create(int fd);
         int recv_stream(int fd);
+        void conn_create(int fd, ucp_ep_h ucp_ep);
 
         void conn_release_recvs(int fd);
         void ucx_ep_close(int fd, bool close_event);
+
+        int process_writes(vector<FiredFileEvent> &fired_events);
+        int process_connections(vector<FiredFileEvent> &fired_events);
+
+        int server_conn_create(int fd, ucp_ep_address_t *ucp_ep_addr);
+
+        class {
+            private:
+                int base_fd = -1;
+                std::set<int> in_use;
+
+            public:
+                int open_fd() {
+                    int fd = dup(base_fd);
+
+                    assert(fd > 0);
+                    in_use.insert(fd);
+
+                    return fd;
+                }
+
+                void close_fd(int fd) {
+                    assert(in_use.count(fd) > 0);
+                    in_use.erase(fd);
+                    close(fd);
+                }
+
+                bool is_open(int fd) {
+                    return in_use.count(fd) > 0;
+                }
+
+                bool is_system_fd(int fd) {
+                    return !in_use.count(fd);
+                }
+
+                void init(int base) {
+                    assert(base > 0);
+                    assert(base_fd < 0);
+                    base_fd = base;
+                }
+        } fd_pool;
 
     public:
         UCXDriver(CephContext *c): EpollDriver(c), cct(c),
@@ -85,17 +139,11 @@ class UCXDriver : public EpollDriver {
         int resize_events(int newsize) override;
         int event_wait(vector<FiredFileEvent> &fired_events, struct timeval *tp) override;
 
-        void cleanup(ucp_address_t *ucp_addr);
-        void addr_create(ucp_context_h ucp_context,
-                         ucp_address_t **ucp_addr,
-                         size_t *ucp_addr_len);
-
-        int conn_establish(int fd,
-                           ucp_address_t *ucp_addr,
-                           size_t ucp_addr_len);
-
         void conn_close(int fd);
         void conn_shutdown(int fd);
+
+        void cleanup();
+        void worker_init(ucp_context_h ucp_context);
 
         int is_connected(int fd) {
             return (connections.count(fd) > 0 &&
@@ -103,6 +151,7 @@ class UCXDriver : public EpollDriver {
         }
 
         ssize_t send(int fd, bufferlist &bl, bool more);
+        static void accept_cb(ucp_ep_address_t *ep_addr, void *arg);
 
         static void send_completion_cb(void *request, ucs_status_t status);
         static void send_completion(ucx_req_descr *descr) {
@@ -112,7 +161,22 @@ class UCXDriver : public EpollDriver {
             }
         }
 
-        int read(int fd, char *rbuf, size_t bytes);
+        ssize_t read(int fd, char *rbuf, size_t bytes);
+
+        int listen(entity_addr_t &sa,
+                   const SocketOptions &opt,
+                   int &server_fd);
+
+        int accept(int server_fd, int &fd,
+                   ucp_ep_address_t *&ep_addr);
+
+        int connect(const entity_addr_t& peer_addr,
+                    const SocketOptions &opts, int &fd);
+
+        void stop_listen(int server_fd);
+        void abort_accept(int server_fd);
+
+        int signal(int fd, ucp_ep_address_t *ep_addr);
 };
 
 #endif //CEPH_UCXEVENT_H

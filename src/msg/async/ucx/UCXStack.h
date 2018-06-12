@@ -38,13 +38,7 @@ class UCXConnectedSocketImpl;
 class UCXWorker : public Worker {
 private:
     UCXStack *stack;
-    ucp_address_t *ucp_addr = NULL;
-
-    size_t ucp_addr_len;
-
     UCXDriver *driver;
-    // pass received messages to socket(s)
-    void dispatch_rx();
 
 public:
     explicit UCXWorker(CephContext *c, unsigned i);
@@ -56,22 +50,25 @@ public:
     virtual void initialize() override;
     virtual void destroy() override;
 
-    void addr_create();
-    int conn_establish(int fd);
-
+    void worker_init();
     void set_stack(UCXStack *s);
+
+    int signal(int fd, ucp_ep_address_t *ep_addr);
+
     UCXStack *get_stack() { return stack; }
+
+    int signal();
 };
 
 class UCXConnectedSocketImpl : public ConnectedSocketImpl {
 private:
     UCXWorker *worker;
 
-    int tcp_fd;
+    int conn_fd;
     CephContext *cct() { return worker->cct; }
 
 public:
-    UCXConnectedSocketImpl(UCXWorker *w);
+    UCXConnectedSocketImpl(UCXWorker *w, int fd);
     virtual ~UCXConnectedSocketImpl();
 
     int connect(const entity_addr_t& peer_addr, const SocketOptions &opt);
@@ -84,7 +81,7 @@ public:
     virtual ssize_t send(bufferlist &bl, bool more) override;
     virtual void shutdown() override;
     virtual void close() override;
-    virtual int fd() const override { return tcp_fd; }
+    virtual int fd() const override { return conn_fd; }
 
     //ucp request magic
     static void request_init(void *req);
@@ -93,13 +90,15 @@ public:
 
 class UCXServerSocketImpl : public ServerSocketImpl {
 private:
+    int port;
+    int server_fd;
+
     UCXWorker *worker;
-    int server_setup_socket = -1;
 
     CephContext *cct() { return worker->cct; }
 
 public:
-    UCXServerSocketImpl(UCXWorker *w);
+    UCXServerSocketImpl(UCXWorker *w, int server_socket);
     ~UCXServerSocketImpl();
 
     int listen(entity_addr_t &sa, const SocketOptions &opt);
@@ -108,7 +107,7 @@ public:
     virtual int accept(ConnectedSocket *sock, const SocketOptions &opt, entity_addr_t *out, Worker *w) override;
     virtual void abort_accept() override;
     // Get file descriptor
-    virtual int fd() const override { return server_setup_socket; }
+    virtual int fd() const override { return server_fd; }
 };
 
 class UCXStack : public NetworkStack {
