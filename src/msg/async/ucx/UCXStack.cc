@@ -365,7 +365,8 @@ void UCXStack::ucx_contex_create()
     ucp_config_release(ucp_config);
 
     if (UCS_OK != status) {
-        lderr(cct) << __func__ << "failed to init UCP context" << dendl;
+	
+        lderr(cct) << __func__ << " failed to init UCP context: " << ucs_status_string(status) << dendl;
         ceph_abort();
     }
 
