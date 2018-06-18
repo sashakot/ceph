@@ -53,11 +53,10 @@ public:
     void worker_init();
     void set_stack(UCXStack *s);
 
+    int get_fd();
     int signal(int fd, ucp_ep_address_t *ep_addr);
 
     UCXStack *get_stack() { return stack; }
-
-    int signal();
 };
 
 class UCXConnectedSocketImpl : public ConnectedSocketImpl {

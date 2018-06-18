@@ -3,11 +3,6 @@
 
 #include <vector>
 
-//Vasily: ???
-//#include <cinttypes>
-//#include <cstdint>
-//#include <limits.h>
-
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -25,7 +20,6 @@ extern "C" {
 struct ucx_rx_buf {
     size_t length;
     size_t offset;
-
     uint8_t *rdata;
 };
 
@@ -51,6 +45,17 @@ typedef struct {
     ucp_ep_address_t *ep_addr;
 } accept_t;
 
+class UCXDriver;
+typedef struct {
+    int fd;
+    UCXDriver *driver;
+} ucp_accept_arg_t;
+
+typedef struct {
+    ucp_accept_arg_t *arg;
+    ucp_listener_h inst;
+} listener_t;
+
 class UCXDriver : public EpollDriver {
     private:
         CephContext *cct;
@@ -69,7 +74,7 @@ class UCXDriver : public EpollDriver {
 
         std::set<int> conn_requests;
 
-        std::map<int, ucp_listener_h> listeners;
+        std::map<int, listener_t> listeners;
         std::map<int, std::deque<ucp_ep_address_t *>> accept_queues;
 
         void event_progress();
@@ -92,13 +97,16 @@ class UCXDriver : public EpollDriver {
 
         int server_conn_create(int fd, ucp_ep_address_t *ucp_ep_addr);
 
-        class {
+        class FDPool {
             private:
                 int base_fd = -1;
+
+                Mutex lock;
                 std::set<int> in_use;
 
             public:
                 int open_fd() {
+                    Mutex::Locker l(lock);
                     int fd = dup(base_fd);
 
                     assert(fd > 0);
@@ -109,23 +117,30 @@ class UCXDriver : public EpollDriver {
 
                 void close_fd(int fd) {
                     assert(in_use.count(fd) > 0);
+                    Mutex::Locker l(lock);
                     in_use.erase(fd);
-                    close(fd);
+                    ::close(fd);
                 }
 
                 bool is_open(int fd) {
+                    Mutex::Locker l(lock);
                     return in_use.count(fd) > 0;
                 }
 
                 bool is_system_fd(int fd) {
+                    Mutex::Locker l(lock);
                     return !in_use.count(fd);
                 }
 
                 void init(int base) {
                     assert(base > 0);
                     assert(base_fd < 0);
+
                     base_fd = base;
                 }
+
+                FDPool(): lock("UCXDriver::FDPool::lock") {}
+                ~FDPool() {}
         } fd_pool;
 
     public:
@@ -161,15 +176,17 @@ class UCXDriver : public EpollDriver {
             }
         }
 
+        int get_fd() {
+            return fd_pool.open_fd();
+        }
+
         ssize_t read(int fd, char *rbuf, size_t bytes);
 
         int listen(entity_addr_t &sa,
                    const SocketOptions &opt,
                    int &server_fd);
 
-        int accept(int server_fd, int &fd,
-                   ucp_ep_address_t *&ep_addr);
-
+        int accept(int server_fd, ucp_ep_address_t *&ep_addr);
         int connect(const entity_addr_t& peer_addr,
                     const SocketOptions &opts, int &fd);
 

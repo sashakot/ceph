@@ -104,7 +104,7 @@ UCXServerSocketImpl::UCXServerSocketImpl(UCXWorker *w, int server_socket)
 
 UCXServerSocketImpl::~UCXServerSocketImpl()
 {
-    if (server_fd) {
+    if (server_fd > 0) {
         UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
         driver->stop_listen(server_fd);
     }
@@ -124,17 +124,18 @@ int UCXServerSocketImpl::accept(ConnectedSocket *sock,
                                 Worker *w)
 {
     int ret;
-    int fd = 0;
-
     ucp_ep_address_t *ep_addr;
 
     UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
 
-    ret = driver->accept(server_fd, fd, ep_addr);
+    ret = driver->accept(server_fd, ep_addr);
     if (ret < 0) {
         return -EAGAIN; //Vasily: ??????
     }
 
+    UCXWorker *ucx_worker = (UCXWorker *) w;
+
+    int fd = ucx_worker->get_fd();
     UCXConnectedSocketImpl *p = new UCXConnectedSocketImpl(dynamic_cast<UCXWorker *>(w), fd);
 
     std::unique_ptr<UCXConnectedSocketImpl> csi(p);
@@ -152,7 +153,7 @@ int UCXServerSocketImpl::accept(ConnectedSocket *sock,
         out->set_sockaddr((sockaddr *)addr);
     }
 
-    ret = ((UCXWorker *) w)->signal(fd, ep_addr);
+    ret = ucx_worker->signal(fd, ep_addr);
     if (ret < 0) {
         ceph_abort(); //Vasily: return code ????
     }
@@ -162,12 +163,12 @@ int UCXServerSocketImpl::accept(ConnectedSocket *sock,
 
 void UCXServerSocketImpl::abort_accept()
 {
-    if (server_fd) { //Vasily: ????
+    if (server_fd > 0) { //Vasily: ????
         UCXDriver *driver = dynamic_cast<UCXDriver *>(worker->center.get_driver());
         driver->abort_accept(server_fd);
     }
 
-    server_fd = 0;
+    server_fd = -1;
 }
 
 UCXWorker::UCXWorker(CephContext *c, unsigned i) : Worker(c, i)
@@ -176,6 +177,11 @@ UCXWorker::UCXWorker(CephContext *c, unsigned i) : Worker(c, i)
 
 UCXWorker::~UCXWorker()
 {
+}
+
+int UCXWorker::get_fd()
+{
+   return driver->get_fd();
 }
 
 int UCXWorker::signal(int fd, ucp_ep_address_t *ep_addr)
@@ -273,10 +279,11 @@ void UCXStack::ucx_contex_create()
                         UCP_FEATURE_STREAM;
 
     params.mt_workers_shared = 1;
-    params.tag_sender_mask = -1;
-    params.request_size    = sizeof(ucx_req_descr);
-    params.request_init    = UCXConnectedSocketImpl::request_init;
-    params.request_cleanup = UCXConnectedSocketImpl::request_cleanup;
+    params.tag_sender_mask   = -1;
+    params.request_size      = sizeof(ucx_req_descr);
+
+    params.request_init      = UCXConnectedSocketImpl::request_init;
+    params.request_cleanup   = UCXConnectedSocketImpl::request_cleanup;
 
     status = ucp_init(&params, ucp_config, &ucp_context);
     ucp_config_release(ucp_config);
@@ -320,7 +327,7 @@ UCXStack::~UCXStack()
 
 void UCXStack::spawn_worker(unsigned i, std::function<void ()> &&func)
 {
-    threads.resize(i+1);
+    threads.resize(i + 1);
     threads[i] = std::thread(func);
 }
 
