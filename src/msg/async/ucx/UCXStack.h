@@ -42,7 +42,6 @@ private:
 
     size_t ucp_addr_len;
 
-    UCXDriver *driver;
     // pass received messages to socket(s)
     void dispatch_rx();
 

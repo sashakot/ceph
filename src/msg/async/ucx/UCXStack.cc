@@ -137,6 +137,7 @@ int UCXConnectedSocketImpl::accept(int server_sock,
 
 int UCXWorker::conn_establish(int fd)
 {
+    UCXDriver *driver = dynamic_cast<UCXDriver *>(center.get_driver());
     return  driver->conn_establish(fd, ucp_addr, ucp_addr_len);
 }
 
@@ -303,6 +304,8 @@ void UCXWorker::initialize()
 void UCXWorker::destroy()
 {
     if (NULL != ucp_addr) {
+        UCXDriver *driver = dynamic_cast<UCXDriver *>(center.get_driver());
+
         driver->cleanup(ucp_addr);
         ucp_addr = NULL;
     }
@@ -379,8 +382,8 @@ void UCXStack::ucx_contex_create()
 }
 
 void UCXWorker::addr_create()
-{
-    driver = dynamic_cast<UCXDriver *>(center.get_driver());
+{    
+    UCXDriver *driver = dynamic_cast<UCXDriver *>(center.get_driver());
     driver->addr_create(get_stack()->get_ucp_context(),
                         &ucp_addr, &ucp_addr_len);
 }
