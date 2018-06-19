@@ -72,7 +72,7 @@ int UCXConnectedSocketImpl::connect(const entity_addr_t& peer_addr, const Socket
 
     tcp_fd = net.connect(peer_addr, opts.connect_bind_addr);
     if (tcp_fd < 0) {
-        lderr(cct()) << __func__ << " failed to allocate client socket" << dendl;
+        lderr(cct()) << __func__ << " failed to allocate client socket peer: " << peer_addr << " bind : "<< opts.connect_bind_addr <<dendl;
         return -errno;
     }
 
