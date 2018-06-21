@@ -208,6 +208,12 @@ int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, Con
 {
     int fd = 0;
 
+    if (!stack->is_ready()) {
+      ldout(cct, 10) << __func__ << " Network Stack is not ready" << dendl;
+      return -1;
+    }
+
+
     driver = dynamic_cast<UCXDriver *>(center.get_driver());
 
     int r = driver->connect(addr, opts, fd);
