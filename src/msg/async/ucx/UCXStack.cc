@@ -208,6 +208,8 @@ int UCXWorker::connect(const entity_addr_t &addr, const SocketOptions &opts, Con
 {
     int fd = 0;
 
+    driver = dynamic_cast<UCXDriver *>(center.get_driver());
+
     int r = driver->connect(addr, opts, fd);
     if (r < 0) {
         ldout(cct, 1) << __func__ << " try connecting failed." << dendl;
