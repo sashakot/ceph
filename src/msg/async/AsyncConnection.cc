@@ -1531,7 +1531,7 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
     goto fail;
   }
 
-  if (existing == this)
+ // if (existing == this)
     existing = NULL;
   if (existing) {
     // There is no possible that existing connection will acquire this
