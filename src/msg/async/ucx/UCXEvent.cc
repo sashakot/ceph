@@ -96,7 +96,7 @@ int UCXDriver::connect(const entity_addr_t &peer_addr,
 
     ep_params.user_data = reinterpret_cast<void *>(fd);
     ep_params.flags     = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
-#if 1
+#if 0
     struct sockaddr_in addr;
 
     memset(&addr, 0, sizeof(addr));
@@ -108,7 +108,7 @@ int UCXDriver::connect(const entity_addr_t &peer_addr,
     ep_params.sockaddr.addr    = (struct sockaddr *) &addr;
     ep_params.sockaddr.addrlen = sizeof(struct sockaddr);
 #endif
-#if 0
+#if 1
     ep_params.sockaddr.addr    = peer_addr.get_sockaddr();
     ep_params.sockaddr.addrlen = sizeof(struct sockaddr);
 #endif
