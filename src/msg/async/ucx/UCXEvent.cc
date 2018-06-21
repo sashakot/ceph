@@ -181,7 +181,7 @@ int UCXDriver::listen(entity_addr_t &sa,
     server_fd = fd_pool.open_fd();
     params.field_mask = UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
                         UCP_LISTENER_PARAM_FIELD_ACCEPT_HANDLER2;
-#if 1
+#if 0
     struct sockaddr_in addr;
 
     memset(&addr, 0, sizeof(addr));
@@ -194,7 +194,7 @@ int UCXDriver::listen(entity_addr_t &sa,
     params.sockaddr.addr    = reinterpret_cast<const struct sockaddr*>(&addr);
     params.sockaddr.addrlen = sizeof(struct sockaddr);
 #endif
-#if 0
+#if 1
     params.sockaddr.addr    = sa.get_sockaddr();
     params.sockaddr.addrlen = sizeof(struct sockaddr);
 #endif
